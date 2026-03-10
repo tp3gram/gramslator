@@ -10,7 +10,7 @@ Designed for ELECROW ESP32-S3 3.5in touchscreen platform:
 
 Guide for ESP32 with related screen using `esp-generate`: https://esp32.implrust.com/tft-display/index.html
 
-## ELECROW Board Pin Definitions
+### ELECROW Board Pin Definitions
 
 I2C (Touchscreen, RTC clock)
 - SDA IO15
