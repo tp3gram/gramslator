@@ -12,6 +12,8 @@ Guide for ESP32 with related screen using `esp-generate`: https://esp32.implrust
 
 `esp-generate` tool: https://github.com/esp-rs/esp-generate
 
+Prior to `cargo build`, `espup install` provides command for exporting environment variables related for the xtensa toolchain when opening a new terminal session.
+
 ### ELECROW Board Pin Definitions
 
 I2C (Touchscreen, RTC clock)
