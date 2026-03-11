@@ -8,14 +8,25 @@
 #![deny(clippy::large_stack_frames)]
 
 use esp_hal::clock::CpuClock;
+use esp_hal::delay::Delay;
+use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::spi::master::{Config, Spi};
 use esp_hal::timer::timg::TimerGroup;
 
-
-use esp_println as _;
 use defmt::info;
+use esp_println as _;
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use embedded_hal_bus::spi::ExclusiveDevice;
+
+use embedded_graphics::{
+    pixelcolor::Rgb565,
+    prelude::*,
+    primitives::{Circle, Primitive, PrimitiveStyle, Triangle},
+};
+
+use mipidsi::Builder;
+use mipidsi::interface::SpiInterface;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -23,7 +34,6 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 
 extern crate alloc;
-
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -36,7 +46,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.2.0
-
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -56,10 +65,90 @@ async fn main(spawner: Spawner) -> ! {
     // TODO: Spawn some tasks
     let _ = spawner;
 
+    info!("Buzzer");
+
+    let pin_buzzer = peripherals.GPIO8;
+    let mut buzzer = Output::new(pin_buzzer, Level::Low, OutputConfig::default());
+
+    info!("Buzzer on!");
+
+    // // --- Display initialization ---
+    // // Define the SPI pins and create the SPI interface
+    // let pin_spi_sck = peripherals.GPIO42;
+    // let pin_spi_mosi = peripherals.GPIO39;
+    // let pin_spi_data_command = peripherals.GPIO41;
+    // let pin_spi_chip_select = peripherals.GPIO40;
+    // // No reset pin for display
+
+    // let spi = Spi::new(peripherals.SPI2, Config::default())
+    //     .unwrap()
+    //     .with_mosi(pin_spi_mosi)
+    //     .with_sck(pin_spi_sck);
+
+    // let cs = Output::new(pin_spi_chip_select, Level::High, OutputConfig::default());
+    // let dc = Output::new(pin_spi_data_command, Level::Low, OutputConfig::default());
+
+    // // Wrap SPI with ExclusiveDevice for thread-safe access
+    // let mut spi_device = ExclusiveDevice::new_no_delay(spi, cs);
+
+    // let mut buffer = [0_u8; 512];
+    // let spi_interface = SpiInterface::new(&mut spi_device, dc, &mut buffer);
+
+    // // Create a Delay instance for use with embedded-hal drivers
+    // let mut delay = Delay::new();
+
+    // // Define the display from the display interface and initialize it
+    // let mut display = Builder::new(mipidsi::models::ILI9488Rgb565, spi_interface)
+    //     .init(&mut delay)
+    //     .unwrap();
+
+    // info!("Display initialized!");
+
+    // // Make the display all black
+    // display.clear(Rgb565::BLACK).unwrap();
+
+    // // Draw a smiley face with white eyes and a red mouth
+    // draw_smiley(&mut display).unwrap();
+
     loop {
-        info!("Hello world!");
-        Timer::after(Duration::from_secs(1)).await;
+        buzzer.set_high();
+        Delay::new().delay_millis(1);
+        buzzer.set_low();
+        Delay::new().delay_millis(1);
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.0.0/examples
+}
+
+/// Example from: https://github.com/almindor/mipidsi/blob/master/examples/spi-ili9486-esp32-c3/src/main.rs
+fn draw_smiley<T: DrawTarget<Color = Rgb565>>(display: &mut T) -> Result<(), T::Error> {
+    // Draw the left eye as a circle located at (50, 100), with a diameter of 40, filled with white
+    Circle::new(Point::new(50, 100), 40)
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+        .draw(display)?;
+
+    // Draw the right eye as a circle located at (50, 200), with a diameter of 40, filled with white
+    Circle::new(Point::new(50, 200), 40)
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+        .draw(display)?;
+
+    // Draw an upside down red triangle to represent a smiling mouth
+    Triangle::new(
+        Point::new(130, 140),
+        Point::new(130, 200),
+        Point::new(160, 170),
+    )
+    .into_styled(PrimitiveStyle::with_fill(Rgb565::RED))
+    .draw(display)?;
+
+    // Cover the top part of the mouth with a black triangle so it looks closed instead of open
+    Triangle::new(
+        Point::new(130, 150),
+        Point::new(130, 190),
+        Point::new(150, 170),
+    )
+    .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+    .draw(display)?;
+
+    Ok(())
 }
