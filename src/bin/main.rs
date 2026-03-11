@@ -28,6 +28,7 @@ use embedded_graphics::{
 
 use mipidsi::Builder;
 use mipidsi::interface::SpiInterface;
+use mipidsi::options::{ColorInversion, ColorOrder};
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -91,7 +92,9 @@ async fn main(spawner: Spawner) -> ! {
 
     let spi_device = Spi::new(
         peripherals.SPI2,
-        Config::default().with_frequency(Rate::from_mhz(40)),
+        Config::default()
+            // Clock frequency sourced from ELECROW example: https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320/blob/master/example/Arduino_Code_35/V1.0/ESP32-AI-Dialogue/Advance_Ai_chat_35/LGFX_Setup.h
+            .with_frequency(Rate::from_mhz(40)),
     )
     .unwrap()
     .with_mosi(pin_spi_mosi)
@@ -111,6 +114,9 @@ async fn main(spawner: Spawner) -> ! {
 
     // Define the display from the display interface and initialize it
     let mut display = Builder::new(mipidsi::models::ILI9488Rgb666, mipi_spi_interface)
+        // Display for the ELECROW has BGR color order and inverted colors.
+        .color_order(ColorOrder::Bgr)
+        .invert_colors(ColorInversion::Inverted)
         .init(&mut delay)
         .unwrap();
 
@@ -118,12 +124,12 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Draw green");
 
-    display.clear(Rgb666::RED).unwrap();
+    display.clear(Rgb666::GREEN).unwrap();
 
     info!("Drawing smiley face");
 
     // Draw a smiley face with white eyes and a red mouth
-    // draw_smiley(&mut display).unwrap();
+    draw_smiley(&mut display).unwrap();
 
     info!("Smiley drawn!");
 
