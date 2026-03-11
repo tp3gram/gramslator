@@ -89,8 +89,12 @@ fn linker_be_nice() {
         std::process::exit(0);
     }
 
-    println!(
-        "cargo:rustc-link-arg=--error-handling-script={}",
-        std::env::current_exe().unwrap().display()
-    );
+    // --error-handling-script is only supported by the RISC-V GNU ld, not the Xtensa one.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target.starts_with("riscv") {
+        println!(
+            "cargo:rustc-link-arg=--error-handling-script={}",
+            std::env::current_exe().unwrap().display()
+        );
+    }
 }

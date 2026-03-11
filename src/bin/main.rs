@@ -65,14 +65,11 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // The reclaimed-bootloader region is only ~66 KB on ESP32-C3.
-    // mbedTLS alone needs 40+ KB for session state, so we use regular SRAM instead.
+    // mbedTLS alone needs 40+ KB for session state, so we use regular SRAM.
     esp_alloc::heap_allocator!(size: 150_000);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_interrupt =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0);
 
     // True Random Number Generator — needs ADC1 as entropy source
     let _trng_source = TrngSource::new(peripherals.RNG, peripherals.ADC1);
