@@ -7,11 +7,14 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+mod elecrow_board;
+
 use alloc::string::String;
+use defmt::info;
 use embassy_executor::Spawner;
+use embassy_net::StackResources;
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::StackResources;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write as _;
 use esp_backtrace as _;
@@ -19,19 +22,17 @@ use esp_hal::clock::CpuClock;
 use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::wifi::{AuthMethod, ClientConfig, ModeConfig, WifiDevice};
-use log::info;
 use mbedtls_rs::{AuthMode, ClientSessionConfig, Session, SessionConfig, Tls};
 use static_cell::StaticCell;
 use tinyrlibc as _;
 
 extern crate alloc;
 
-const DEEPGRAM_HOST_CSTR: &core::ffi::CStr = match core::ffi::CStr::from_bytes_with_nul(
-    concat!(env!("DEEPGRAM_HOST"), "\0").as_bytes(),
-) {
-    Ok(s) => s,
-    Err(_) => panic!("DEEPGRAM_HOST contains an interior null byte"),
-};
+const DEEPGRAM_HOST_CSTR: &core::ffi::CStr =
+    match core::ffi::CStr::from_bytes_with_nul(concat!(env!("DEEPGRAM_HOST"), "\0").as_bytes()) {
+        Ok(s) => s,
+        Err(_) => panic!("DEEPGRAM_HOST contains an interior null byte"),
+    };
 
 /// Raw WAV file baked into flash. The PCM data starts at byte 44 (standard WAV header).
 const AUDIO_WAV: &[u8] = include_bytes!("assets/missile.wav");
@@ -40,7 +41,6 @@ const WAV_HEADER_SIZE: usize = 44;
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
-
 
 #[embassy_executor::task]
 async fn net_task(mut runner: embassy_net::Runner<'static, WifiDevice<'static>>) {
@@ -219,14 +219,23 @@ async fn main(spawner: Spawner) -> ! {
         "\r\n",
     ).as_bytes();
 
-    session.write_all(upgrade_request).await.expect("Failed to send upgrade request");
-    session.flush().await.expect("Failed to flush upgrade request");
+    session
+        .write_all(upgrade_request)
+        .await
+        .expect("Failed to send upgrade request");
+    session
+        .flush()
+        .await
+        .expect("Failed to flush upgrade request");
 
     // Read the HTTP 101 response
     let mut http_buf = [0u8; 1024];
     let mut http_len = 0;
     loop {
-        let n = session.read(&mut http_buf[http_len..]).await.expect("Failed reading HTTP response");
+        let n = session
+            .read(&mut http_buf[http_len..])
+            .await
+            .expect("Failed reading HTTP response");
         if n == 0 {
             panic!("Connection closed during WebSocket upgrade");
         }

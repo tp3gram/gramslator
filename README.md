@@ -14,7 +14,11 @@ Guide for ESP32 with related screen using `esp-generate`: https://esp32.implrust
 
 Prior to `cargo build`, `espup install` provides command for exporting environment variables related for the xtensa toolchain when opening a new terminal session.
 
-### ELECROW Board Pin Definitions
+### ELECROW Board Hardware definitions
+
+Chipset: `ESP32-S3-WROOM-1-N16R8` ([Datasheet](https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320/blob/master/Datasheet/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf))
+
+#### Pins
 
 I2C (Touchscreen, RTC clock)
 - SDA IO15
@@ -40,15 +44,16 @@ Speaker (I2S out)
 - BCLK IO13
 - LRCLK IO11
 
-Screen (ILI9488 driver)
-- SCK IO42
-- SDA IO39
-
-- RS IO41
-- CS IO40
-
+Screen (ILI9488 driver, page 23 of driver datasheet)
 - LED Backlight: IO38
 - Screen power: IO14
+
+- SCK (SCLK) IO42
+- SDA (MOSI) IO39
+- MISO not used (unidirectional SPI)
+
+- RS (DC, Data/command selection pin) IO41
+- CS (Chip select) IO40
 
 - Touch screen (GT911 controller)
   - Interfaced over I2C

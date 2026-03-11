@@ -1,8 +1,8 @@
 [package]
-edition      = "2024"
-name         = "test-project"
+edition = "2024"
+name = "gramslator"
 rust-version = "1.88"
-version      = "0.1.0"
+version = "0.1.0"
 
 [[bin]]
 name = "test-project"
@@ -19,8 +19,8 @@ esp-rtos = { version = "0.2.0", features = [
   "log-04",
 ] }
 
-esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3", "log-04"] }
-log                    = "0.4.27"
+defmt = "1.0.1"
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["defmt", "esp32s3"] }
 
 embassy-net = { version = "0.8", features = [
   "dhcpv4",
@@ -65,10 +65,16 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 ] }
 
 critical-section = "1.2.0"
-static_cell      = "2.1.1"
+static_cell = "2.1.1"
+mipidsi = "0.10.0"
+embedded-graphics = "0.8.2"
+embedded-hal-bus = "0.1"
+embedded-hal = { version = "0.2", optional = true }
 
 edge-ws = { version = "0.7", default-features = false, features = ["io"] }
-mbedtls-rs = { git = "https://github.com/esp-rs/mbedtls-rs", features = ["log"] }
+mbedtls-rs = { git = "https://github.com/esp-rs/mbedtls-rs", features = [
+  "log",
+] }
 tinyrlibc = { version = "0.5", default-features = false, features = ["memchr"] }
 
 
@@ -78,10 +84,10 @@ tinyrlibc = { version = "0.5", default-features = false, features = ["memchr"] }
 opt-level = "s"
 
 [profile.release]
-codegen-units    = 1     # LLVM can perform better optimizations using a single thread
-debug            = 2
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
 debug-assertions = false
-incremental      = false
-lto              = 'fat'
-opt-level        = 's'
-overflow-checks  = false
+incremental = false
+lto = 'fat'
+opt-level = 's'
+overflow-checks = false
