@@ -19,6 +19,7 @@ use mbedtls_rs::{
 };
 use smoltcp::wire::IpAddress;
 use static_cell::StaticCell;
+use crate::elecrow_board::translate;
 
 // ---- Buffer pool for concurrent TCP connections ----------------------------
 
@@ -417,8 +418,9 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
             }
             Ok(Ok((frame_type, len))) => match frame_type {
                 edge_ws::FrameType::Text(_) => {
-                    let text = core::str::from_utf8(&recv_buf[..len]).unwrap_or("<invalid UTF-8>");
-                    info!("Received: {}", text);
+                    let json = core::str::from_utf8(&recv_buf[..len]).unwrap_or("<invalid UTF-8>");
+                    info!("Received: {}", json);
+                    translate_response(network, tls, json).await;
                 }
                 edge_ws::FrameType::Binary(_) => {
                     info!("Received binary frame ({} bytes)", len);
@@ -465,4 +467,47 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
     }
 
     info!("Done! Deepgram streaming complete.");
+}
+
+/// Extract a Deepgram transcript from `json`, translate it (en -> es) via
+/// Google Translate, and cache the result. Skips the TLS round-trip on cache
+/// hits.
+async fn translate_response(
+    stack: embassy_net::Stack<'static>,
+    tls: &Tls<'_>,
+    json: &str,
+) {
+    let Some(transcript) = translate::extract_transcript(json) else {
+        info!("No transcript field found in response");
+        return;
+    };
+
+    // Check cache — return early on hit.
+    if let Some(result) = translate::check_translation_cache(transcript) {
+        info!("Translation cache hit: \"{}\"", result.as_str());
+        return;
+    }
+
+    let mut conn = match TlsConnection::init(
+        stack,
+        "translation.googleapis.com",
+        443,
+        tls,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            info!("Failed to connect to Google Translate: {:?}", e);
+            return;
+        }
+    };
+
+    translate::translate_response(&mut *conn, transcript).await;
+
+    // Close the TLS session cleanly so that PSA crypto resources are released
+    // before the Session is dropped.
+    if let Err(e) = conn.session.close().await {
+        info!("TLS close error (non-fatal): {:?}", e);
+    }
 }
