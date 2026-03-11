@@ -1,8 +1,33 @@
 fn main() {
+    load_dotenv();
     linker_be_nice();
-    println!("cargo:rustc-link-arg=-Tdefmt.x");
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+/// Read a `.env` file (if present) and forward every `KEY=VALUE` pair to
+/// rustc via `cargo:rustc-env` so that `env!()` picks them up at compile time.
+fn load_dotenv() {
+    let dotenv_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+
+    // Re-run this build script whenever .env changes.
+    println!("cargo:rerun-if-changed={}", dotenv_path.display());
+
+    let contents = match std::fs::read_to_string(&dotenv_path) {
+        Ok(c) => c,
+        Err(_) => return, // no .env file — rely on real env vars instead
+    };
+
+    for line in contents.lines() {
+        let line = line.trim();
+        // Skip blanks and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            println!("cargo:rustc-env={}={}", key.trim(), value.trim());
+        }
+    }
 }
 
 fn linker_be_nice() {
@@ -64,8 +89,12 @@ fn linker_be_nice() {
         std::process::exit(0);
     }
 
-    println!(
-        "cargo:rustc-link-arg=-Wl,--error-handling-script={}",
-        std::env::current_exe().unwrap().display()
-    );
+    // --error-handling-script is only supported by the RISC-V GNU ld, not the Xtensa one.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target.starts_with("riscv") {
+        println!(
+            "cargo:rustc-link-arg=--error-handling-script={}",
+            std::env::current_exe().unwrap().display()
+        );
+    }
 }

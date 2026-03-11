@@ -5,47 +5,53 @@ rust-version = "1.88"
 version = "0.1.0"
 
 [[bin]]
-name = "gramslator"
+name = "test-project"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.0", features = ["defmt", "esp32s3", "unstable"] }
+esp-hal = { version = "~1.0", features = ["esp32s3", "log-04", "unstable"] }
 
 esp-rtos = { version = "0.2.0", features = [
-  "defmt",
   "embassy",
   "esp-alloc",
   "esp-radio",
   "esp32s3",
+  "log-04",
 ] }
 
 defmt = "1.0.1"
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["defmt", "esp32s3"] }
 
-embassy-net = { version = "0.7.1", features = [
-  "defmt",
+embassy-net = { version = "0.8", features = [
   "dhcpv4",
+  "dns",
+  "log",
   "medium-ethernet",
   "tcp",
   "udp",
 ] }
-embedded-io = { version = "0.7.1", features = ["defmt"] }
-embedded-io-async = { version = "0.7.0", features = ["defmt"] }
-esp-alloc = { version = "0.9.0", features = ["defmt"] }
-esp-println = { version = "0.16.1", features = ["defmt-espflash", "esp32s3"] }
+embedded-io = "0.7"
+embedded-io-async = "0.7"
+esp-alloc = "0.9.0"
+esp-backtrace = { version = "0.18.1", features = [
+  "esp32s3",
+  "panic-handler",
+  "println",
+] }
+esp-println = { version = "0.16.1", features = ["esp32s3", "log-04"] }
 # for more networking protocol support see https://crates.io/crates/edge-net
-embassy-executor = { version = "0.9.1", features = ["defmt"] }
-embassy-time = { version = "0.5.0", features = ["defmt"] }
+embassy-executor = { version = "0.9.1", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log"] }
 esp-radio = { version = "0.17.0", features = [
-  "defmt",
   "esp-alloc",
   "esp32s3",
+  "log-04",
   "smoltcp",
   "unstable",
   "wifi",
 ] }
 smoltcp = { version = "0.12.0", default-features = false, features = [
-  "defmt",
+  "log",
   "medium-ethernet",
   "multicast",
   "proto-dhcpv4",
@@ -64,6 +70,12 @@ mipidsi = "0.10.0"
 embedded-graphics = "0.8.2"
 embedded-hal-bus = "0.1"
 embedded-hal = { version = "0.2", optional = true }
+
+edge-ws = { version = "0.7", default-features = false, features = ["io"] }
+mbedtls-rs = { git = "https://github.com/esp-rs/mbedtls-rs", features = [
+  "log",
+] }
+tinyrlibc = { version = "0.5", default-features = false, features = ["memchr"] }
 
 
 [profile.dev]
