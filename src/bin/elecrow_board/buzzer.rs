@@ -1,8 +1,11 @@
 use esp_hal::gpio::{Level, Output, OutputConfig};
-use esp_hal::peripherals::Peripherals;
 
-pub fn init_pin<'d>(peripherals: Peripherals) -> Output<'d> {
-    let pin_buzzer = peripherals.GPIO8;
+pub struct BuzzerHardware<'a> {
+    pub buzzer_pin: esp_hal::peripherals::GPIO8<'a>,
+}
+
+pub fn init<'d>(buzzer_hardware: BuzzerHardware<'d>) -> Output<'d> {
+    let pin_buzzer = buzzer_hardware.buzzer_pin;
 
     Output::new(pin_buzzer, Level::Low, OutputConfig::default())
 }

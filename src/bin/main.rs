@@ -62,15 +62,30 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Buzzer");
 
-    let buzzer = elecrow_board::buzzer::init_pin(peripherals);
+    let buzzer = elecrow_board::buzzer::init(elecrow_board::buzzer::BuzzerHardware {
+        buzzer_pin: peripherals.GPIO8,
+    });
 
     info!("Buzzer on!");
 
     // --- Display initialization ---
-    // Create a Delay instance for use with embedded-hal drivers
     let mut buffer = [0_u8; 512];
-    let mut delay = Delay::new();
-    let mut display = elecrow_board::display::init(peripherals, &mut buffer, delay);
+    let delay = Delay::new();
+    let mut display = elecrow_board::display::init(
+        elecrow_board::display::DisplayHardware {
+            spi: elecrow_board::display::DisplaySPIBus {
+                spi_peripheral: peripherals.SPI2,
+                sck: peripherals.GPIO42,
+                mosi: peripherals.GPIO39,
+                data_command: peripherals.GPIO41,
+                chip_select: peripherals.GPIO40,
+            },
+            pin_tft_power: peripherals.GPIO14,
+            pin_backlight: peripherals.GPIO38,
+        },
+        &mut buffer,
+        delay,
+    );
 
     info!("Display initialized!");
 
