@@ -7,28 +7,21 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+mod elecrow_board;
+
 use esp_hal::clock::CpuClock;
 use esp_hal::delay::Delay;
-use esp_hal::gpio::{Level, Output, OutputConfig};
-use esp_hal::spi::master::{Config, Spi};
-use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 
 use defmt::info;
 use esp_println as _;
 
 use embassy_executor::Spawner;
-use embedded_hal_bus::spi::ExclusiveDevice;
 
 use embedded_graphics::{
-    pixelcolor::{Rgb565, Rgb666},
     prelude::*,
     primitives::{Circle, Primitive, PrimitiveStyle, Triangle},
 };
-
-use mipidsi::Builder;
-use mipidsi::interface::SpiInterface;
-use mipidsi::options::{ColorInversion, ColorOrder};
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -69,62 +62,23 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Buzzer");
 
-    let pin_buzzer = peripherals.GPIO8;
-    let mut buzzer = Output::new(pin_buzzer, Level::Low, OutputConfig::default());
+    let buzzer = elecrow_board::buzzer::init_pin(peripherals);
 
     info!("Buzzer on!");
 
     // --- Display initialization ---
-    let pin_tft_power = peripherals.GPIO14;
-    let pin_backlight = peripherals.GPIO38;
-
-    let mut tft_power = Output::new(pin_tft_power, Level::Low, OutputConfig::default());
-    tft_power.set_high();
-    let mut backlight = Output::new(pin_backlight, Level::Low, OutputConfig::default());
-    backlight.set_high();
-
-    // Define the SPI pins and create the SPI interface
-    let pin_spi_sck = peripherals.GPIO42;
-    let pin_spi_mosi = peripherals.GPIO39;
-    let pin_spi_data_command = peripherals.GPIO41;
-    let pin_spi_chip_select = peripherals.GPIO40;
-    // No reset pin for display
-
-    let spi_device = Spi::new(
-        peripherals.SPI2,
-        Config::default()
-            // Clock frequency sourced from ELECROW example: https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320/blob/master/example/Arduino_Code_35/V1.0/ESP32-AI-Dialogue/Advance_Ai_chat_35/LGFX_Setup.h
-            .with_frequency(Rate::from_mhz(40)),
-    )
-    .unwrap()
-    .with_mosi(pin_spi_mosi)
-    .with_sck(pin_spi_sck);
-
-    let chip_select = Output::new(pin_spi_chip_select, Level::Low, OutputConfig::default());
-    let data_command = Output::new(pin_spi_data_command, Level::Low, OutputConfig::default());
-
-    // Wrap SPI with ExclusiveDevice for thread-safe access
-    let mut spi_device_wrapper = ExclusiveDevice::new_no_delay(spi_device, chip_select);
-
-    let mut buffer = [0_u8; 512];
-    let mipi_spi_interface = SpiInterface::new(&mut spi_device_wrapper, data_command, &mut buffer);
-
     // Create a Delay instance for use with embedded-hal drivers
+    let mut buffer = [0_u8; 512];
     let mut delay = Delay::new();
-
-    // Define the display from the display interface and initialize it
-    let mut display = Builder::new(mipidsi::models::ILI9488Rgb666, mipi_spi_interface)
-        // Display for the ELECROW has BGR color order and inverted colors.
-        .color_order(ColorOrder::Bgr)
-        .invert_colors(ColorInversion::Inverted)
-        .init(&mut delay)
-        .unwrap();
+    let mut display = elecrow_board::display::init(peripherals, &mut buffer, delay);
 
     info!("Display initialized!");
 
     info!("Draw green");
 
-    display.clear(Rgb666::GREEN).unwrap();
+    display
+        .clear(elecrow_board::display::PixelType::GREEN)
+        .unwrap();
 
     info!("Drawing smiley face");
 
@@ -144,15 +98,21 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 /// Example from: https://github.com/almindor/mipidsi/blob/master/examples/spi-ili9486-esp32-c3/src/main.rs
-fn draw_smiley<T: DrawTarget<Color = Rgb666>>(display: &mut T) -> Result<(), T::Error> {
+fn draw_smiley<T: DrawTarget<Color = elecrow_board::display::PixelType>>(
+    display: &mut T,
+) -> Result<(), T::Error> {
     // Draw the left eye as a circle located at (50, 100), with a diameter of 40, filled with white
     Circle::new(Point::new(50, 100), 40)
-        .into_styled(PrimitiveStyle::with_fill(Rgb666::WHITE))
+        .into_styled(PrimitiveStyle::with_fill(
+            elecrow_board::display::PixelType::WHITE,
+        ))
         .draw(display)?;
 
     // Draw the right eye as a circle located at (50, 200), with a diameter of 40, filled with white
     Circle::new(Point::new(50, 200), 40)
-        .into_styled(PrimitiveStyle::with_fill(Rgb666::WHITE))
+        .into_styled(PrimitiveStyle::with_fill(
+            elecrow_board::display::PixelType::WHITE,
+        ))
         .draw(display)?;
 
     // Draw an upside down red triangle to represent a smiling mouth
@@ -161,7 +121,9 @@ fn draw_smiley<T: DrawTarget<Color = Rgb666>>(display: &mut T) -> Result<(), T::
         Point::new(130, 200),
         Point::new(160, 170),
     )
-    .into_styled(PrimitiveStyle::with_fill(Rgb666::RED))
+    .into_styled(PrimitiveStyle::with_fill(
+        elecrow_board::display::PixelType::RED,
+    ))
     .draw(display)?;
 
     // Cover the top part of the mouth with a black triangle so it looks closed instead of open
@@ -170,7 +132,9 @@ fn draw_smiley<T: DrawTarget<Color = Rgb666>>(display: &mut T) -> Result<(), T::
         Point::new(130, 190),
         Point::new(150, 170),
     )
-    .into_styled(PrimitiveStyle::with_fill(Rgb666::BLACK))
+    .into_styled(PrimitiveStyle::with_fill(
+        elecrow_board::display::PixelType::BLACK,
+    ))
     .draw(display)?;
 
     Ok(())
