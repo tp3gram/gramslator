@@ -45,15 +45,15 @@ Speaker (I2S out)
 - LRCLK IO11
 
 Screen (ILI9488 driver, page 23 of driver datasheet)
+- LED Backlight: IO38
+- Screen power: IO14
+
 - SCK (SCLK) IO42
 - SDA (MOSI) IO39
 - MISO not used (unidirectional SPI)
 
 - RS (DC, Data/command selection pin) IO41
 - CS (Chip select) IO40
-
-- LED Backlight: IO38
-- Screen power: IO14
 
 - Touch screen (GT911 controller)
   - Interfaced over I2C
