@@ -60,8 +60,6 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.2.0
 
-    esp_println::logger::init_logger_from_env();
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
