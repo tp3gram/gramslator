@@ -12,7 +12,7 @@ use embassy_net::tcp::{ConnectError, TcpSocket};
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{Read, Write};
 use esp_hal::peripherals::WIFI;
-use esp_radio::wifi::{AuthMethod, ClientConfig, ModeConfig, WifiDevice};
+use esp_radio::wifi::{AuthMethod, ClientConfig, ModeConfig, WifiController, WifiDevice};
 use mbedtls_rs::{
     AuthMode, ClientSessionConfig, Session, SessionConfig, SessionError, Tls, TlsVersion,
 };
@@ -179,9 +179,11 @@ pub async fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::
     let radio_init = RADIO_CONTROLLER
         .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
 
-    let (mut wifi_controller, interfaces) =
+    static WIFI_CONTROLLER: StaticCell<WifiController<'static>> = StaticCell::new();
+    let (wifi_controller, interfaces) =
         esp_radio::wifi::new(radio_init, hardware.wifi, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
+    let wifi_controller = WIFI_CONTROLLER.init(wifi_controller);
 
     let client_config = ClientConfig::default()
         .with_ssid(String::from(env!("WIFI_SSID")))
