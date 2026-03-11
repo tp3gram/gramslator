@@ -1,2 +1,3 @@
 [toolchain]
-channel = "esp"
+channel    = "esp"
+components = ["rust-src"]
