@@ -1,6 +1,6 @@
-use embedded_graphics::pixelcolor::Rgb666;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::peripherals::{GPIO14, GPIO38, GPIO39, GPIO40, GPIO41, GPIO42, SPI2};
 use esp_hal::spi::master::{Config, Spi};
 use esp_hal::time::Rate;
 
@@ -13,21 +13,26 @@ use mipidsi::models::ILI9488Rgb666;
 use mipidsi::options::{ColorInversion, ColorOrder};
 use mipidsi::{Builder, Display};
 
+use embedded_graphics::Drawable;
+use embedded_graphics::pixelcolor::Rgb666;
+use embedded_graphics::prelude::{DrawTarget, Point, Primitive, RgbColor};
+use embedded_graphics::primitives::{Circle, PrimitiveStyle, Triangle};
+
 pub type PixelType = Rgb666;
 
 pub struct DisplaySPIBus<'a> {
-    pub spi_peripheral: esp_hal::peripherals::SPI2<'a>,
+    pub spi_peripheral: SPI2<'a>,
 
-    pub sck: esp_hal::peripherals::GPIO42<'a>,
-    pub mosi: esp_hal::peripherals::GPIO39<'a>,
-    pub data_command: esp_hal::peripherals::GPIO41<'a>,
-    pub chip_select: esp_hal::peripherals::GPIO40<'a>,
+    pub sck: GPIO42<'a>,
+    pub mosi: GPIO39<'a>,
+    pub data_command: GPIO41<'a>,
+    pub chip_select: GPIO40<'a>,
 }
 
 pub struct DisplayHardware<'a> {
     pub spi: DisplaySPIBus<'a>,
-    pub pin_tft_power: esp_hal::peripherals::GPIO14<'a>,
-    pub pin_backlight: esp_hal::peripherals::GPIO38<'a>,
+    pub pin_tft_power: GPIO14<'a>,
+    pub pin_backlight: GPIO38<'a>,
 }
 
 pub type DisplayType<'a> = Display<
@@ -91,4 +96,37 @@ pub fn init<'a>(
         .invert_colors(ColorInversion::Inverted)
         .init(&mut delay)
         .unwrap()
+}
+
+/// Example from: https://github.com/almindor/mipidsi/blob/master/examples/spi-ili9486-esp32-c3/src/main.rs
+pub fn draw_smiley<T: DrawTarget<Color = PixelType>>(display: &mut T) -> Result<(), T::Error> {
+    // Draw the left eye as a circle located at (50, 100), with a diameter of 40, filled with white
+    Circle::new(Point::new(50, 100), 40)
+        .into_styled(PrimitiveStyle::with_fill(PixelType::WHITE))
+        .draw(display)?;
+
+    // Draw the right eye as a circle located at (50, 200), with a diameter of 40, filled with white
+    Circle::new(Point::new(50, 200), 40)
+        .into_styled(PrimitiveStyle::with_fill(PixelType::WHITE))
+        .draw(display)?;
+
+    // Draw an upside down red triangle to represent a smiling mouth
+    Triangle::new(
+        Point::new(130, 140),
+        Point::new(130, 200),
+        Point::new(160, 170),
+    )
+    .into_styled(PrimitiveStyle::with_fill(PixelType::RED))
+    .draw(display)?;
+
+    // Cover the top part of the mouth with a black triangle so it looks closed instead of open
+    Triangle::new(
+        Point::new(130, 150),
+        Point::new(130, 190),
+        Point::new(150, 170),
+    )
+    .into_styled(PrimitiveStyle::with_fill(PixelType::BLACK))
+    .draw(display)?;
+
+    Ok(())
 }

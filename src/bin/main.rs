@@ -18,10 +18,7 @@ use esp_println as _;
 
 use embassy_executor::Spawner;
 
-use embedded_graphics::{
-    prelude::*,
-    primitives::{Circle, Primitive, PrimitiveStyle, Triangle},
-};
+use embedded_graphics::prelude::RgbColor;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -62,7 +59,7 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Buzzer");
 
-    let buzzer = elecrow_board::buzzer::init(elecrow_board::buzzer::BuzzerHardware {
+    let mut buzzer = elecrow_board::buzzer::init(elecrow_board::buzzer::BuzzerHardware {
         buzzer_pin: peripherals.GPIO8,
     });
 
@@ -91,14 +88,16 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Draw green");
 
-    display
-        .clear(elecrow_board::display::PixelType::GREEN)
-        .unwrap();
+    embedded_graphics::prelude::DrawTarget::clear(
+        &mut display,
+        elecrow_board::display::PixelType::GREEN,
+    )
+    .unwrap();
 
     info!("Drawing smiley face");
 
     // Draw a smiley face with white eyes and a red mouth
-    draw_smiley(&mut display).unwrap();
+    elecrow_board::display::draw_smiley(&mut display).unwrap();
 
     info!("Smiley drawn!");
 
@@ -110,47 +109,4 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.0.0/examples
-}
-
-/// Example from: https://github.com/almindor/mipidsi/blob/master/examples/spi-ili9486-esp32-c3/src/main.rs
-fn draw_smiley<T: DrawTarget<Color = elecrow_board::display::PixelType>>(
-    display: &mut T,
-) -> Result<(), T::Error> {
-    // Draw the left eye as a circle located at (50, 100), with a diameter of 40, filled with white
-    Circle::new(Point::new(50, 100), 40)
-        .into_styled(PrimitiveStyle::with_fill(
-            elecrow_board::display::PixelType::WHITE,
-        ))
-        .draw(display)?;
-
-    // Draw the right eye as a circle located at (50, 200), with a diameter of 40, filled with white
-    Circle::new(Point::new(50, 200), 40)
-        .into_styled(PrimitiveStyle::with_fill(
-            elecrow_board::display::PixelType::WHITE,
-        ))
-        .draw(display)?;
-
-    // Draw an upside down red triangle to represent a smiling mouth
-    Triangle::new(
-        Point::new(130, 140),
-        Point::new(130, 200),
-        Point::new(160, 170),
-    )
-    .into_styled(PrimitiveStyle::with_fill(
-        elecrow_board::display::PixelType::RED,
-    ))
-    .draw(display)?;
-
-    // Cover the top part of the mouth with a black triangle so it looks closed instead of open
-    Triangle::new(
-        Point::new(130, 150),
-        Point::new(130, 190),
-        Point::new(150, 170),
-    )
-    .into_styled(PrimitiveStyle::with_fill(
-        elecrow_board::display::PixelType::BLACK,
-    ))
-    .draw(display)?;
-
-    Ok(())
 }

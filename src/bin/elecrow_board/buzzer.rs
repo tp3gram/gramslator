@@ -1,7 +1,10 @@
-use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::{
+    gpio::{Level, Output, OutputConfig},
+    peripherals::GPIO8,
+};
 
 pub struct BuzzerHardware<'a> {
-    pub buzzer_pin: esp_hal::peripherals::GPIO8<'a>,
+    pub buzzer_pin: GPIO8<'a>,
 }
 
 pub fn init<'d>(buzzer_hardware: BuzzerHardware<'d>) -> Output<'d> {
