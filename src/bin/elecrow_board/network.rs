@@ -398,29 +398,64 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
     info!("Audio sent! Keeping connection open for 10 seconds...");
 
     // ---- Read responses for 10 seconds ----------------------------------------
+    //
+    // Deepgram sends many partial transcript frames in rapid succession.
+    // Rather than translating every frame, we buffer the latest transcript
+    // JSON and only translate once Deepgram goes idle for
+    // `TRANSLATE_IDLE_TIMEOUT`. This "trailing edge" approach ensures:
+    //   - We never flood Google Translate with redundant partial requests.
+    //   - The most recent transcript is always translated once speech pauses.
+
+    /// How long to wait without receiving a new text frame before translating
+    /// the most recently buffered transcript.
+    const TRANSLATE_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 
     let deadline = embassy_time::Instant::now() + Duration::from_secs(10);
     let mut recv_buf = [0u8; 4096];
     let mut done = false;
 
+    // Buffer for the most recent transcript JSON awaiting translation.
+    // When the idle timer fires we translate this and clear it.
+    let mut pending_json: Option<String> = None;
+
     while !done && embassy_time::Instant::now() < deadline {
+        // Pick the shorter of the two timeouts: overall deadline, or idle
+        // timer (if we have a buffered transcript waiting for a lull).
         let remaining = deadline - embassy_time::Instant::now();
+        let timeout = if pending_json.is_some() {
+            remaining.min(TRANSLATE_IDLE_TIMEOUT)
+        } else {
+            remaining
+        };
 
         match embassy_time::with_timeout(
-            remaining,
+            timeout,
             edge_ws::io::recv(&mut *conn, &mut recv_buf),
         )
         .await
         {
             Err(_timeout) => {
-                info!("10-second window elapsed.");
-                break;
+                // No frame arrived before the timeout.
+                // If we have a pending transcript, translate it now.
+                if let Some(json) = pending_json.take() {
+                    info!("Idle timeout — translating buffered transcript");
+                    translate_response(network, tls, &json).await;
+                }
+
+                // If the overall deadline has also elapsed, break out.
+                if embassy_time::Instant::now() >= deadline {
+                    info!("10-second window elapsed.");
+                    break;
+                }
             }
             Ok(Ok((frame_type, len))) => match frame_type {
                 edge_ws::FrameType::Text(_) => {
                     let json = core::str::from_utf8(&recv_buf[..len]).unwrap_or("<invalid UTF-8>");
                     info!("Received: {}", json);
-                    translate_response(network, tls, json).await;
+                    // Buffer the latest transcript; it overwrites any previous
+                    // pending frame so only the most recent partial gets
+                    // translated once Deepgram goes idle.
+                    pending_json = Some(String::from(json));
                 }
                 edge_ws::FrameType::Binary(_) => {
                     info!("Received binary frame ({} bytes)", len);
@@ -449,6 +484,12 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
                 done = true;
             }
         }
+    }
+
+    // Translate any remaining buffered transcript before closing.
+    if let Some(json) = pending_json.take() {
+        info!("Translating final buffered transcript before close");
+        translate_response(network, tls, &json).await;
     }
 
     // Signal end of audio stream
