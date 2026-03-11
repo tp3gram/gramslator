@@ -11,7 +11,8 @@ use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::{ConnectError, TcpSocket};
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{Read, Write};
-use esp_hal::peripherals::WIFI;
+use esp_hal::peripherals::{ADC1, RNG, WIFI};
+use esp_hal::rng::{Trng, TrngSource};
 use esp_radio::wifi::{AuthMethod, ClientConfig, ModeConfig, WifiController, WifiDevice};
 use mbedtls_rs::{
     AuthMode, ClientSessionConfig, Session, SessionConfig, SessionError, Tls, TlsVersion,
@@ -61,25 +62,19 @@ impl<'a> TlsConnection<'a> {
     /// Resolve `host`, claim a free buffer pair, open a TCP connection
     /// (with retries), create a TLS session, and perform the handshake.
     pub async fn init(
-        stack: embassy_net::Stack<'static>,
+        network: embassy_net::Stack<'static>,
         host: &str,
         port: u16,
         tls: &'a Tls<'_>,
     ) -> Result<Self, ConnectionError> {
         // 1. DNS resolution
-        info!("Resolving {}...", host);
-        let ip_addrs = stack
-            .dns_query(host, DnsQueryType::A)
-            .await
-            .map_err(ConnectionError::DnsResolution)?;
-        let remote_ip = ip_addrs[0];
-        info!("Resolved {} → {}", host, remote_ip);
+        let remote_ip = resolve(network, host).await?;
 
         // 2. Claim a free buffer pair from the static pool
         let (rx_buf, tx_buf) = Self::claim_buffers()?;
 
         // 3. Create and configure the TCP socket
-        let mut socket = TcpSocket::new(stack, rx_buf, tx_buf);
+        let mut socket = TcpSocket::new(network, rx_buf, tx_buf);
         socket.set_timeout(Some(Duration::from_secs(30)));
 
         // 4. TCP connect with retries
@@ -169,6 +164,29 @@ pub struct NetworkHardware {
     pub wifi: WIFI<'static>,
 }
 
+pub struct TlsHardware {
+    pub rng: RNG<'static>,
+    pub adc1: ADC1<'static>,
+}
+
+/// Initialise the True Random Number Generator and create the mbedTLS
+/// singleton.  Must only be called once (the static cells will panic on a
+/// second call).
+pub fn init_tls(hardware: TlsHardware) -> Tls<'static> {
+    // TrngSource configures the RNG peripheral; it must stay alive.
+    static TRNG_SOURCE: StaticCell<TrngSource<'static>> = StaticCell::new();
+    static TRNG: StaticCell<Trng> = StaticCell::new();
+
+    let trng_source = TrngSource::new(hardware.rng, hardware.adc1);
+    TRNG_SOURCE.init(trng_source);
+
+    let trng = TRNG.init(Trng::try_new().expect("TrngSource not active"));
+
+    let mut tls = Tls::new(trng).expect("Failed to create TLS instance");
+    tls.set_debug(1);
+    tls
+}
+
 #[embassy_executor::task]
 async fn net_task(mut runner: embassy_net::Runner<'static, WifiDevice<'static>>) {
     runner.run().await
@@ -233,11 +251,11 @@ pub async fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::
 
 /// Resolve a hostname to an IPv4 address via DNS.
 pub async fn resolve(
-    stack: embassy_net::Stack<'_>,
+    network: embassy_net::Stack<'_>,
     host: &str,
-) -> Result<IpAddress, embassy_net::dns::Error> {
+) -> Result<IpAddress, ConnectionError> {
     info!("Resolving {}...", host);
-    let ip_addrs = stack.dns_query(host, DnsQueryType::A).await?;
+    let ip_addrs = network.dns_query(host, DnsQueryType::A).await.map_err(ConnectionError::DnsResolution)?;
     let ip = ip_addrs[0];
     info!("Resolved {} → {}", host, ip);
     Ok(ip)
@@ -331,4 +349,120 @@ where
         }
     }
     info!("WebSocket connected!");
+}
+
+pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static>) {
+    /// Raw WAV file baked into flash. The PCM data starts at byte 44 (standard WAV header).
+    const AUDIO_WAV: &[u8] = include_bytes!("../assets/missile.wav");
+    const WAV_HEADER_SIZE: usize = 44;
+
+    // ---- TLS connection -------------------------------------------------------
+
+    let mut conn =
+        TlsConnection::init(network, env!("DEEPGRAM_HOST"), 443, &tls)
+            .await
+            .expect("Failed to establish TLS connection");
+
+    // ---- WebSocket upgrade ----------------------------------------------------
+
+    websocket_upgrade(&mut *conn).await;
+
+    // ---- Stream audio ---------------------------------------------------------
+
+    let audio_data = &AUDIO_WAV[WAV_HEADER_SIZE..];
+    let chunk_size = 2048;
+    let mask_key: u32 = 0xDEAD_BEEF; // Fixed mask key for PoC
+
+    info!(
+        "Sending {} bytes of audio ({} chunks)...",
+        audio_data.len(),
+        audio_data.len().div_ceil(chunk_size)
+    );
+
+    for (i, chunk) in audio_data.chunks(chunk_size).enumerate() {
+        edge_ws::io::send(
+            &mut *conn,
+            edge_ws::FrameType::Binary(false),
+            Some(mask_key),
+            chunk,
+        )
+        .await
+        .expect("Failed to send audio chunk");
+        conn.flush().await.expect("Failed to flush audio chunk");
+
+        if i % 10 == 0 {
+            info!("  Sent chunk {}", i);
+        }
+    }
+    info!("Audio sent! Keeping connection open for 10 seconds...");
+
+    // ---- Read responses for 10 seconds ----------------------------------------
+
+    let deadline = embassy_time::Instant::now() + Duration::from_secs(10);
+    let mut recv_buf = [0u8; 4096];
+    let mut done = false;
+
+    while !done && embassy_time::Instant::now() < deadline {
+        let remaining = deadline - embassy_time::Instant::now();
+
+        match embassy_time::with_timeout(
+            remaining,
+            edge_ws::io::recv(&mut *conn, &mut recv_buf),
+        )
+        .await
+        {
+            Err(_timeout) => {
+                info!("10-second window elapsed.");
+                break;
+            }
+            Ok(Ok((frame_type, len))) => match frame_type {
+                edge_ws::FrameType::Text(_) => {
+                    let text = core::str::from_utf8(&recv_buf[..len]).unwrap_or("<invalid UTF-8>");
+                    info!("Received: {}", text);
+                }
+                edge_ws::FrameType::Binary(_) => {
+                    info!("Received binary frame ({} bytes)", len);
+                }
+                edge_ws::FrameType::Close => {
+                    info!("WebSocket closed by server.");
+                    done = true;
+                }
+                edge_ws::FrameType::Ping => {
+                    info!("Ping received, sending pong");
+                    let _ = edge_ws::io::send(
+                        &mut *conn,
+                        edge_ws::FrameType::Pong,
+                        Some(mask_key),
+                        &recv_buf[..len],
+                    )
+                    .await;
+                    let _ = conn.flush().await;
+                }
+                other => {
+                    info!("Received {:?} frame ({} bytes)", other, len);
+                }
+            },
+            Ok(Err(e)) => {
+                info!("WebSocket recv error: {:?}", e);
+                done = true;
+            }
+        }
+    }
+
+    // Signal end of audio stream
+    if !done {
+        let close_stream = b"{\"type\":\"CloseStream\"}";
+        edge_ws::io::send(
+            &mut *conn,
+            edge_ws::FrameType::Text(false),
+            Some(mask_key),
+            close_stream,
+        )
+        .await
+        .expect("Failed to send CloseStream");
+        conn.flush().await.expect("Failed to flush CloseStream");
+        info!("Sent CloseStream");
+    }
+
+    info!("Done! Deepgram streaming complete.");
 }
