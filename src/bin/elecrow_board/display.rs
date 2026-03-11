@@ -31,8 +31,8 @@ pub struct DisplaySPIBus<'a> {
 
 pub struct DisplayHardware<'a> {
     pub spi: DisplaySPIBus<'a>,
-    pub pin_tft_power: GPIO14<'a>,
-    pub pin_backlight: GPIO38<'a>,
+    pub tft_power_pin: GPIO14<'a>,
+    pub backlight_pin: GPIO38<'a>,
 }
 
 pub type DisplayType<'a> = Display<
@@ -45,19 +45,22 @@ pub type DisplayType<'a> = Display<
     mipidsi::NoResetPin,
 >;
 
+/// Setup hardware to interface with the `ILI9488` display driver over SPI on the ELECROW board.
+///
+/// `ILI9488` driver datasheet: https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320/blob/master/Datasheet/NEW%20ILI9488_Data%20Sheet%20for%20all%20customers(V109)_20181205.pdf
 pub fn init<'a>(
     display_hardware: DisplayHardware<'a>,
     buffer: &'a mut [u8],
     mut delay: Delay,
 ) -> DisplayType<'a> {
     let mut tft_power = Output::new(
-        display_hardware.pin_tft_power,
+        display_hardware.tft_power_pin,
         Level::Low,
         OutputConfig::default(),
     );
     tft_power.set_high();
     let mut backlight = Output::new(
-        display_hardware.pin_backlight,
+        display_hardware.backlight_pin,
         Level::Low,
         OutputConfig::default(),
     );
