@@ -4,6 +4,7 @@ use alloc::boxed::Box;
 use alloc::ffi::CString;
 use alloc::string::String;
 
+use crate::translate;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_net::StackResources;
@@ -19,7 +20,8 @@ use mbedtls_rs::{
 };
 use smoltcp::wire::IpAddress;
 use static_cell::StaticCell;
-use crate::elecrow_board::translate;
+
+extern crate alloc;
 
 // ---- Buffer pool for concurrent TCP connections ----------------------------
 
@@ -361,7 +363,7 @@ where
 
 pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static>) {
     /// Raw WAV file baked into flash. The PCM data starts at byte 44 (standard WAV header).
-    const AUDIO_WAV: &[u8] = include_bytes!("../assets/missile.wav");
+    const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
     const WAV_HEADER_SIZE: usize = 44;
 
     // ---- TLS connection -------------------------------------------------------
