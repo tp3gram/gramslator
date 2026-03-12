@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "ab_glyph_rasterizer"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1648,6 +1657,7 @@ dependencies = [
 name = "gramslator"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph_rasterizer",
  "critical-section",
  "defmt 1.0.1",
  "edge-ws",
@@ -1656,7 +1666,7 @@ dependencies = [
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-graphics",
- "embedded-hal 0.2.7",
+ "embedded-hal 1.0.0",
  "embedded-hal-bus",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
@@ -1675,6 +1685,7 @@ dependencies = [
  "smoltcp",
  "static_cell",
  "tinyrlibc",
+ "ttf-parser",
 ]
 
 [[package]]
@@ -2799,6 +2810,12 @@ checksum = "702d4415e08923e7e1ef96cd5727c0dfed80b4d2fa25db9647fe5eb6f7c5a4c4"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "ttf-parser"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c591d83f69777866b9126b24c6dd9a18351f177e49d625920d19f989fd31cf8"
 
 [[package]]
 name = "typenum"

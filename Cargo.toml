@@ -3,6 +3,7 @@ edition = "2024"
 name = "gramslator"
 rust-version = "1.88"
 version = "0.1.0"
+autobins = false
 
 [[bin]]
 name = "test-project"
@@ -43,7 +44,7 @@ esp-backtrace = { version = "0.18.1", features = [
 esp-println = { version = "0.16.1", features = ["esp32s3", "defmt-espflash"] }
 # for more networking protocol support see https://crates.io/crates/edge-net
 embassy-executor = { version = "0.9.1", features = ["defmt"] }
-embassy-sync = "0.7"
+embassy-sync = { version = "0.7", features = ["defmt"] }
 embassy-time = { version = "0.5.0", features = ["defmt"] }
 esp-radio = { version = "0.17.0", features = [
   "esp-alloc",
@@ -72,7 +73,7 @@ static_cell = "2.1.1"
 mipidsi = "0.10.0"
 embedded-graphics = "0.8.2"
 embedded-hal-bus = "0.1"
-embedded-hal = { version = "0.2", optional = true }
+embedded-hal = "1.0"
 
 edge-ws = { version = "0.7", default-features = false, features = [
   "io",
@@ -82,6 +83,8 @@ mbedtls-rs = { git = "https://github.com/esp-rs/mbedtls-rs", features = [
   "defmt",
 ] }
 tinyrlibc = { version = "0.5", default-features = false, features = ["memchr"] }
+ttf-parser = { version = "0.21", default-features = false }
+ab_glyph_rasterizer = { version = "0.1", default-features = false, features = ["libm"] }
 konst = "0.3.16"
 
 

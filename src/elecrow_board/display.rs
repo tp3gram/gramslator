@@ -1,18 +1,30 @@
+//! Hardware-specific display initialisation for the ELECROW CrowPanel 3.5" HMI.
+//!
+//! Initialises the ILI9488 display controller via SPI using `mipidsi` for the
+//! one-time register setup, then releases the driver and converts the SPI bus
+//! to **async DMA mode**.  The returned [`AsyncDisplay`] streams pixel data
+//! through [`flush_region`](AsyncDisplay::flush_region), yielding to the
+//! Embassy executor during each ~4 KiB DMA chunk transfer.
+
+extern crate alloc;
+
+use alloc::vec;
+
 use esp_hal::delay::Delay;
+use esp_hal::dma::{DmaChannelFor, DmaRxBuf, DmaTxBuf};
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::peripherals::{GPIO14, GPIO38, GPIO39, GPIO40, GPIO41, GPIO42, SPI2};
-use esp_hal::spi::master::{Config, Spi};
+use esp_hal::spi::master::{AnySpi, Config, Spi, SpiDmaBus};
 use esp_hal::time::Rate;
 
-use esp_println as _;
-
-use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_hal::spi::{ErrorType, Operation, SpiBus, SpiDevice};
 
 use mipidsi::interface::SpiInterface;
 use mipidsi::models::ILI9488Rgb666;
-use mipidsi::options::{ColorInversion, ColorOrder};
-use mipidsi::{Builder, Display};
+use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
+use mipidsi::Builder;
 
+// Keep embedded-graphics imports for draw_smiley helper.
 use embedded_graphics::Drawable;
 use embedded_graphics::pixelcolor::Rgb666;
 use embedded_graphics::prelude::{DrawTarget, Point, Primitive, RgbColor};
@@ -20,9 +32,12 @@ use embedded_graphics::primitives::{Circle, PrimitiveStyle, Triangle};
 
 pub type PixelType = Rgb666;
 
+// ---------------------------------------------------------------------------
+// Hardware descriptor structs
+// ---------------------------------------------------------------------------
+
 pub struct DisplaySPIBus<'a> {
     pub spi_peripheral: SPI2<'a>,
-
     pub sck: GPIO42<'a>,
     pub mosi: GPIO39<'a>,
     pub data_command: GPIO41<'a>,
@@ -35,24 +50,179 @@ pub struct DisplayHardware<'a> {
     pub backlight_pin: GPIO38<'a>,
 }
 
-pub type DisplayType<'a> = Display<
-    SpiInterface<
-        'a,
-        ExclusiveDevice<Spi<'a, esp_hal::Blocking>, Output<'a>, embedded_hal_bus::spi::NoDelay>,
-        Output<'a>,
-    >,
-    ILI9488Rgb666,
-    mipidsi::NoResetPin,
->;
+// ---------------------------------------------------------------------------
+// Temporary blocking SpiDevice for mipidsi init
+// ---------------------------------------------------------------------------
 
-/// Setup hardware to interface with the `ILI9488` display driver over SPI on the ELECROW board.
+/// Wraps `SpiDmaBus<Blocking>` + CS pin into an `embedded_hal::spi::SpiDevice`
+/// that can be decomposed after use.  Only lives during display initialisation.
+struct InitSpiDevice<'a> {
+    bus: SpiDmaBus<'a, esp_hal::Blocking>,
+    cs: Output<'a>,
+}
+
+impl ErrorType for InitSpiDevice<'_> {
+    type Error = esp_hal::spi::Error;
+}
+
+impl SpiDevice for InitSpiDevice<'_> {
+    fn transaction(&mut self, operations: &mut [Operation<'_, u8>]) -> Result<(), Self::Error> {
+        self.cs.set_low();
+        let result = operations.iter_mut().try_for_each(|op| match op {
+            Operation::Read(buf) => SpiBus::read(&mut self.bus, buf),
+            Operation::Write(buf) => SpiBus::write(&mut self.bus, buf),
+            Operation::Transfer(read, write) => SpiBus::transfer(&mut self.bus, read, write),
+            Operation::TransferInPlace(buf) => SpiBus::transfer_in_place(&mut self.bus, buf),
+            Operation::DelayNs(_) => Ok(()),
+        });
+        let flush = SpiBus::flush(&mut self.bus);
+        self.cs.set_high();
+        result?;
+        flush
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AsyncDisplay — post-init async DMA display driver
+// ---------------------------------------------------------------------------
+
+/// Async DMA display driver for the ILI9488.
 ///
-/// `ILI9488` driver datasheet: https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320/blob/master/Datasheet/NEW%20ILI9488_Data%20Sheet%20for%20all%20customers(V109)_20181205.pdf
+/// Created by [`init`], which uses `mipidsi` for the one-time ILI9488 register
+/// setup and then converts the SPI bus to async DMA mode.
+///
+/// Pixel data is streamed through [`flush_region`](Self::flush_region) which
+/// yields to the Embassy executor during each ~4 KiB DMA chunk, freeing the
+/// CPU for other tasks (audio capture, networking, …).
+pub struct AsyncDisplay<'a> {
+    bus: SpiDmaBus<'a, esp_hal::Async>,
+    cs: Output<'a>,
+    dc: Output<'a>,
+}
+
+impl<'a> AsyncDisplay<'a> {
+    /// Wire-format conversion buffer size (matches DMA TX chunk capacity).
+    const WIRE_BUF_SIZE: usize = 4092;
+
+    // -- low-level helpers ------------------------------------------------
+
+    /// Send a command byte + optional parameter bytes (blocking, tiny).
+    fn send_cmd(&mut self, cmd: u8, args: &[u8]) {
+        // Command phase: DC low
+        self.dc.set_low();
+        self.cs.set_low();
+        SpiBus::write(&mut self.bus, &[cmd]).unwrap();
+        self.cs.set_high();
+
+        // Data phase: DC high
+        if !args.is_empty() {
+            self.dc.set_high();
+            self.cs.set_low();
+            SpiBus::write(&mut self.bus, args).unwrap();
+            self.cs.set_high();
+        }
+    }
+
+    /// Set the ILI9488 address window.
+    fn set_address_window(&mut self, sx: u16, sy: u16, ex: u16, ey: u16) {
+        // Column Address Set (0x2A)
+        self.send_cmd(
+            0x2A,
+            &[
+                (sx >> 8) as u8,
+                sx as u8,
+                (ex >> 8) as u8,
+                ex as u8,
+            ],
+        );
+        // Page Address Set (0x2B)
+        self.send_cmd(
+            0x2B,
+            &[
+                (sy >> 8) as u8,
+                sy as u8,
+                (ey >> 8) as u8,
+                ey as u8,
+            ],
+        );
+    }
+
+    // -- public API -------------------------------------------------------
+
+    /// Flush a rectangular region of an Rgb666 framebuffer to the display.
+    ///
+    /// The framebuffer stores 3 bytes per pixel `[r, g, b]`, each in 0–63.
+    /// This method converts to the ILI9488 wire format (`r << 2, g << 2,
+    /// b << 2`) in ~4 KiB chunks and streams each chunk via async DMA.
+    ///
+    /// Returns the number of pixels pushed.
+    pub async fn flush_region(
+        &mut self,
+        fb_buf: &[u8],
+        fb_width: u32,
+        sx: u16,
+        sy: u16,
+        w: u16,
+        h: u16,
+    ) -> Result<usize, esp_hal::spi::Error> {
+        let pixel_count = w as usize * h as usize;
+        if pixel_count == 0 {
+            return Ok(0);
+        }
+
+        // Set address window + Memory Write command (0x2C)
+        self.set_address_window(sx, sy, sx + w - 1, sy + h - 1);
+        self.dc.set_low();
+        self.cs.set_low();
+        SpiBus::write(&mut self.bus, &[0x2C]).unwrap();
+        // Switch to data mode; CS stays low for the entire pixel stream.
+        self.dc.set_high();
+
+        // Heap-allocated wire-format conversion buffer (one DMA chunk).
+        // Allocated once per flush in PSRAM — negligible cost.
+        let mut wire_buf = vec![0u8; Self::WIRE_BUF_SIZE];
+        let mut wire_pos = 0;
+
+        for row in 0..h as usize {
+            for col in 0..w as usize {
+                let fb_idx =
+                    ((sy as usize + row) * fb_width as usize + (sx as usize + col)) * 3;
+                wire_buf[wire_pos] = fb_buf[fb_idx] << 2;
+                wire_buf[wire_pos + 1] = fb_buf[fb_idx + 1] << 2;
+                wire_buf[wire_pos + 2] = fb_buf[fb_idx + 2] << 2;
+                wire_pos += 3;
+
+                if wire_pos + 3 > Self::WIRE_BUF_SIZE {
+                    self.bus.write_async(&wire_buf[..wire_pos]).await?;
+                    wire_pos = 0;
+                }
+            }
+        }
+        if wire_pos > 0 {
+            self.bus.write_async(&wire_buf[..wire_pos]).await?;
+        }
+
+        self.cs.set_high();
+        Ok(pixel_count)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Initialisation
+// ---------------------------------------------------------------------------
+
+/// Initialise the ILI9488 display and return an async DMA display driver.
+///
+/// Uses `mipidsi` for the one-time controller register setup, then releases
+/// the driver and converts the SPI bus to async mode.
 pub fn init<'a>(
     display_hardware: DisplayHardware<'a>,
-    buffer: &'a mut [u8],
+    dma_channel: impl DmaChannelFor<AnySpi<'a>>,
+    dma_rx_buf: DmaRxBuf,
+    dma_tx_buf: DmaTxBuf,
     mut delay: Delay,
-) -> DisplayType<'a> {
+) -> AsyncDisplay<'a> {
+    // Power & backlight on
     let mut tft_power = Output::new(
         display_hardware.tft_power_pin,
         Level::Low,
@@ -66,54 +236,63 @@ pub fn init<'a>(
     );
     backlight.set_high();
 
-    let spi_device = Spi::new(
+    // SPI bus (blocking for mipidsi init, converted to async afterwards)
+    let spi_dma_bus = Spi::new(
         display_hardware.spi.spi_peripheral,
-        Config::default()
-            // Clock frequency sourced from ELECROW example: https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320/blob/master/example/Arduino_Code_35/V1.0/ESP32-AI-Dialogue/Advance_Ai_chat_35/LGFX_Setup.h
-            .with_frequency(Rate::from_mhz(40)),
+        Config::default().with_frequency(Rate::from_mhz(40)),
     )
     .unwrap()
     .with_mosi(display_hardware.spi.mosi)
-    .with_sck(display_hardware.spi.sck);
+    .with_sck(display_hardware.spi.sck)
+    .with_dma(dma_channel)
+    .with_buffers(dma_rx_buf, dma_tx_buf);
 
-    let chip_select = Output::new(
+    let cs = Output::new(
         display_hardware.spi.chip_select,
         Level::Low,
         OutputConfig::default(),
     );
-    let data_command = Output::new(
+    let dc = Output::new(
         display_hardware.spi.data_command,
         Level::Low,
         OutputConfig::default(),
     );
 
-    // Wrap SPI with ExclusiveDevice for thread-safe access
-    let spi_device_wrapper = ExclusiveDevice::new_no_delay(spi_device, chip_select);
+    // -- mipidsi init phase (blocking) ------------------------------------
+    let device = InitSpiDevice { bus: spi_dma_bus, cs };
+    let mut buffer = [0u8; 1024];
+    let spi_interface = SpiInterface::new(device, dc, &mut buffer);
 
-    let mipi_spi_interface = SpiInterface::new(spi_device_wrapper, data_command, buffer);
-
-    // Define the display from the display interface and initialize it
-    Builder::new(mipidsi::models::ILI9488Rgb666, mipi_spi_interface)
-        // Display for the ELECROW has BGR color order and inverted colors.
+    let display = Builder::new(ILI9488Rgb666, spi_interface)
         .color_order(ColorOrder::Bgr)
         .invert_colors(ColorInversion::Inverted)
+        .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
         .init(&mut delay)
-        .unwrap()
+        .unwrap();
+
+    // -- release mipidsi, reclaim SPI components --------------------------
+    let (spi_interface, _model, _rst) = display.release();
+    let (device, dc) = spi_interface.release();
+    let InitSpiDevice { bus, cs } = device;
+
+    // -- convert to async DMA mode ----------------------------------------
+    let bus = bus.into_async();
+
+    AsyncDisplay { bus, cs, dc }
 }
+
+// ---------------------------------------------------------------------------
+// Embedded-graphics test helper
+// ---------------------------------------------------------------------------
 
 /// Example from: https://github.com/almindor/mipidsi/blob/master/examples/spi-ili9486-esp32-c3/src/main.rs
 pub fn draw_smiley<T: DrawTarget<Color = PixelType>>(display: &mut T) -> Result<(), T::Error> {
-    // Draw the left eye as a circle located at (50, 100), with a diameter of 40, filled with white
     Circle::new(Point::new(50, 100), 40)
         .into_styled(PrimitiveStyle::with_fill(PixelType::WHITE))
         .draw(display)?;
-
-    // Draw the right eye as a circle located at (50, 200), with a diameter of 40, filled with white
     Circle::new(Point::new(50, 200), 40)
         .into_styled(PrimitiveStyle::with_fill(PixelType::WHITE))
         .draw(display)?;
-
-    // Draw an upside down red triangle to represent a smiling mouth
     Triangle::new(
         Point::new(130, 140),
         Point::new(130, 200),
@@ -121,8 +300,6 @@ pub fn draw_smiley<T: DrawTarget<Color = PixelType>>(display: &mut T) -> Result<
     )
     .into_styled(PrimitiveStyle::with_fill(PixelType::RED))
     .draw(display)?;
-
-    // Cover the top part of the mouth with a black triangle so it looks closed instead of open
     Triangle::new(
         Point::new(130, 150),
         Point::new(130, 190),
@@ -130,6 +307,5 @@ pub fn draw_smiley<T: DrawTarget<Color = PixelType>>(display: &mut T) -> Result<
     )
     .into_styled(PrimitiveStyle::with_fill(PixelType::BLACK))
     .draw(display)?;
-
     Ok(())
 }

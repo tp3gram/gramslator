@@ -1,9 +1,53 @@
 fn main() {
     load_dotenv();
     linker_be_nice();
+    override_memory_map();
     println!("cargo:rustc-link-arg=-Tdefmt.x");
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+/// Override esp-hal's default `memory.x` to increase the flash-mapped segment
+/// sizes from 4 MB to 16 MB so that large `include_bytes!` assets (e.g. fonts)
+/// fit in the binary.
+///
+/// We write our version to `OUT_DIR` and add it as a linker search path.
+/// Cargo processes the current crate's search paths before dependencies, so
+/// our `memory.x` takes precedence over esp-hal's.
+fn override_memory_map() {
+    use std::io::Write;
+
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    println!("cargo:rustc-link-search={}", out.display());
+
+    // This is the stock esp-hal ESP32-S3 memory.x (after preprocessing) with
+    // irom_seg and drom_seg bumped from 4M to 16M to match our 16 MB flash.
+    let memory_x = r#"/* Overridden by gramslator build.rs — 16 MB flash */
+
+/* reserved for ICACHE (32 KB) */
+RESERVE_ICACHE = 0x8000;
+
+VECTORS_SIZE = 0x400;
+
+MEMORY
+{
+  vectors_seg ( RX )     : ORIGIN = 0x40370000 + RESERVE_ICACHE, len = VECTORS_SIZE
+  iram_seg ( RX )        : ORIGIN = 0x40370000 + RESERVE_ICACHE + VECTORS_SIZE, len = 328k - VECTORS_SIZE - RESERVE_ICACHE
+
+  dram2_seg ( RW )       : ORIGIN = 0x3FCDB700, len = 0x3FCED710 - 0x3FCDB700
+  dram_seg ( RW )        : ORIGIN = 0x3FC88000 , len = ORIGIN(dram2_seg) - 0x3FC88000
+
+  /* external flash — 16 MB */
+  irom_seg ( RX )        : ORIGIN = 0x42000020, len = 16M - 0x20
+  drom_seg ( R )         : ORIGIN = 0x3C000020, len = 16M - 0x20
+
+  rtc_fast_seg(RWX) : ORIGIN = 0x600fe000, len = 8k
+  rtc_slow_seg(RW)       : ORIGIN = 0x50000000, len = 8k
+}
+"#;
+
+    let mut f = std::fs::File::create(out.join("memory.x")).expect("create memory.x");
+    f.write_all(memory_x.as_bytes()).expect("write memory.x");
 }
 
 /// Read a `.env` file (if present) and forward every `KEY=VALUE` pair to

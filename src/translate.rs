@@ -14,7 +14,14 @@ use core::fmt::Write as _;
 
 use critical_section::Mutex;
 use defmt::{error, info};
+use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_time::Duration;
 use embedded_io_async::{Read, Write};
+use mbedtls_rs::Tls;
+
+use crate::net::Connection;
 
 /// Cached last translation: `(input_text, translated_text)`.
 static LAST_TRANSLATION: Mutex<RefCell<Option<(String, String)>>> = Mutex::new(RefCell::new(None));
@@ -226,10 +233,10 @@ pub fn extract_transcript(json: &str) -> Option<&str> {
 pub fn check_translation_cache(transcript: &str) -> Option<String> {
     critical_section::with(|cs| {
         let borrow = LAST_TRANSLATION.borrow_ref(cs);
-        if let Some((ref prev_input, ref prev_result)) = *borrow {
-            if prev_input == transcript {
-                return Some(prev_result.clone());
-            }
+        if let Some((ref prev_input, ref prev_result)) = *borrow
+            && prev_input == transcript
+        {
+            return Some(prev_result.clone());
         }
         None
     })
@@ -260,8 +267,120 @@ where
             });
         }
         Err(e) => {
-            info!("Translation failed: {:?}", e);
+            error!("Translation failed: {:?}", e);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Translation task (channel-driven background worker)
+// ---------------------------------------------------------------------------
+
+/// A message sent from the WebSocket receive loop to the translation task.
+pub enum TranscriptMessage {
+    /// A Deepgram JSON frame containing a (possibly partial) transcript.
+    DgJson(String),
+    /// No more frames are coming — translate the buffered transcript
+    /// immediately, skipping the idle-timeout debounce.
+    Flush,
+}
+
+/// Concrete signal type used for translation requests.
+/// "Latest wins" — the producer overwrites any pending value.
+pub type TranslateSignal = Signal<CriticalSectionRawMutex, TranscriptMessage>;
+
+/// Create the translation signal and spawn the background translation task.
+///
+/// Returns a `&'static TranslateSignal` that streaming code should use to
+/// send transcript messages for translation.
+pub fn spawn_translation_task(
+    signal: &'static TranslateSignal,
+    spawner: &Spawner,
+    network: embassy_net::Stack<'static>,
+    tls: &'static Tls<'static>,
+) -> &'static TranslateSignal {
+    spawner
+        .spawn(translation_task(signal, network, tls))
+        .expect("Failed to spawn translation task");
+
+    signal
+}
+
+/// Maximum time to buffer partial transcripts before translating.
+/// Deepgram sends many partial frames in rapid succession; this deadline
+/// caps how long we wait so that translation is never delayed more than
+/// this duration after the first partial arrives, even during continuous
+/// speech.
+const TRANSLATE_DEBOUNCE_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Background task that receives Deepgram JSON via a signal, debounces
+/// rapid partial transcripts, then translates the latest one (en -> es)
+/// via Google Translate.  Skips the TLS round-trip on cache hits.
+#[embassy_executor::task]
+async fn translation_task(
+    signal: &'static TranslateSignal,
+    stack: embassy_net::Stack<'static>,
+    tls: &'static Tls<'static>,
+) {
+    loop {
+        // Block until the first transcript arrives.
+        let mut pending_json = match signal.wait().await {
+            TranscriptMessage::DgJson(json) => json,
+            TranscriptMessage::Flush => continue,
+        };
+
+        // Debounce: keep buffering newer transcripts until the deadline
+        // expires or a Flush arrives.  The deadline is fixed from the
+        // moment the first partial arrives so that continuous speech
+        // cannot postpone translation indefinitely.
+        let deadline = embassy_time::Instant::now() + TRANSLATE_DEBOUNCE_DEADLINE;
+        loop {
+            let remaining = deadline.saturating_duration_since(embassy_time::Instant::now());
+            if remaining == Duration::from_ticks(0) {
+                info!("Debounce deadline reached — translating buffered transcript");
+                break;
+            }
+            match embassy_time::with_timeout(remaining, signal.wait()).await {
+                Err(_timeout) => {
+                    info!("Debounce deadline reached — translating buffered transcript");
+                    break;
+                }
+                Ok(TranscriptMessage::DgJson(json)) => {
+                    // A newer transcript arrived — buffer it instead.
+                    pending_json = json;
+                }
+                Ok(TranscriptMessage::Flush) => {
+                    info!("Final transcript received — translating immediately");
+                    break;
+                }
+            }
+        }
+
+        let Some(transcript) = extract_transcript(&pending_json) else {
+            info!("No transcript field found in response");
+            continue;
+        };
+
+        // Check cache — skip the network round-trip on hit.
+        if let Some(result) = check_translation_cache(transcript) {
+            info!("Translation cache hit: \"{}\"", result.as_str());
+            continue;
+        }
+
+        let mut conn =
+            match Connection::open_tcp_connection_with_tls(stack, env!("GOOGLE_TRANSLATE_HOST"), 443, tls).await {
+                Ok(c) => c,
+                Err(e) => {
+                    info!("Failed to connect to Google Translate: {:?}", e);
+                    continue;
+                }
+            };
+
+        translate_response(&mut conn, transcript).await;
+
+        // Close the connection cleanly so that PSA crypto resources are
+        // released before the Session is dropped.
+        conn.close().await;
     }
 }
 
