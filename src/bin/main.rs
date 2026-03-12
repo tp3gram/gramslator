@@ -98,13 +98,12 @@ async fn main(spawner: Spawner) -> ! {
 
     // ---- Translation task -------------------------------------------------------
 
-    static TRANSLATE_CHANNEL: StaticCell<gramslator::translate::TranslateChannel> =
-        StaticCell::new();
-    let channel = TRANSLATE_CHANNEL.init(gramslator::translate::TranslateChannel::new());
-    let translate_tx =
-        gramslator::translate::spawn_translation_task(channel, &spawner, network, tls);
+    static TRANSLATE_SIGNAL: StaticCell<gramslator::translate::TranslateSignal> = StaticCell::new();
+    let signal = TRANSLATE_SIGNAL.init(gramslator::translate::TranslateSignal::new());
+    let translate_signal =
+        gramslator::translate::spawn_translation_task(signal, &spawner, network, tls);
 
-    elecrow_board::network::test_stream(network, tls, translate_tx).await;
+    elecrow_board::network::test_stream(network, tls, translate_signal).await;
 
     // ---- Display (SPI + async DMA) ---------------------------------------------
     let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =

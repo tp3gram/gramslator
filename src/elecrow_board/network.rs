@@ -159,7 +159,7 @@ pub fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::Stack<
 pub async fn test_stream(
     network: embassy_net::Stack<'static>,
     tls: &'static Tls<'static>,
-    tx: translate::TranslateSender,
+    signal: &'static translate::TranslateSignal,
 ) {
     /// Raw WAV file baked into flash. The PCM data starts at byte 44 (standard WAV header).
     const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
@@ -239,61 +239,29 @@ pub async fn test_stream(
 
     // ---- Read responses for 10 seconds ----------------------------------------
     //
-    // Deepgram sends many partial transcript frames in rapid succession.
-    // Rather than translating every frame, we buffer the latest transcript
-    // JSON and only translate once Deepgram goes idle for
-    // `TRANSLATE_IDLE_TIMEOUT`. This "trailing edge" approach ensures:
-    //   - We never flood Google Translate with redundant partial requests.
-    //   - The most recent transcript is always translated once speech pauses.
-
-    /// How long to wait without receiving a new text frame before translating
-    /// the most recently buffered transcript.
-    const TRANSLATE_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+    // Every text frame is forwarded to the translation task immediately via
+    // a Signal.  The translation task handles idle-timeout debouncing so
+    // that rapid partial transcripts don't flood Google Translate.
 
     let deadline = embassy_time::Instant::now() + Duration::from_secs(10);
     let mut recv_buf = [0u8; 4096];
     let mut done = false;
 
-    // Buffer for the most recent transcript JSON awaiting translation.
-    // When the idle timer fires we translate this and clear it.
-    let mut pending_json: Option<String> = None;
-
     while !done && embassy_time::Instant::now() < deadline {
-        // Pick the shorter of the two timeouts: overall deadline, or idle
-        // timer (if we have a buffered transcript waiting for a lull).
         let remaining = deadline - embassy_time::Instant::now();
-        let timeout = if pending_json.is_some() {
-            remaining.min(TRANSLATE_IDLE_TIMEOUT)
-        } else {
-            remaining
-        };
 
-        match embassy_time::with_timeout(timeout, edge_ws::io::recv(&mut conn, &mut recv_buf)).await
+        match embassy_time::with_timeout(remaining, edge_ws::io::recv(&mut conn, &mut recv_buf))
+            .await
         {
             Err(_timeout) => {
-                // No frame arrived before the timeout.
-                // If we have a pending transcript, queue it for translation.
-                if let Some(json) = pending_json.take() {
-                    info!("Idle timeout — queuing buffered transcript for translation");
-                    if tx.try_send(json).is_err() {
-                        info!("Translation channel full, dropping transcript");
-                    }
-                }
-
-                // If the overall deadline has also elapsed, break out.
-                if embassy_time::Instant::now() >= deadline {
-                    info!("10-second window elapsed.");
-                    break;
-                }
+                info!("10-second window elapsed.");
+                break;
             }
             Ok(Ok((frame_type, len))) => match frame_type {
                 edge_ws::FrameType::Text(_) => {
                     let json = core::str::from_utf8(&recv_buf[..len]).unwrap_or("<invalid UTF-8>");
                     info!("Received: {}", json);
-                    // Buffer the latest transcript; it overwrites any previous
-                    // pending frame so only the most recent partial gets
-                    // translated once Deepgram goes idle.
-                    pending_json = Some(String::from(json));
+                    signal.signal(translate::TranscriptMessage::DgJson(String::from(json)));
                 }
                 edge_ws::FrameType::Binary(_) => {
                     info!("Received binary frame ({} bytes)", len);
@@ -324,11 +292,8 @@ pub async fn test_stream(
         }
     }
 
-    // Queue any remaining buffered transcript before closing.
-    if let Some(json) = pending_json.take() {
-        info!("Queuing final buffered transcript before close");
-        tx.send(json).await;
-    }
+    // Tell the translation task to flush immediately — no more frames coming.
+    signal.signal(translate::TranscriptMessage::Flush);
 
     // Signal end of audio stream
     if !done {

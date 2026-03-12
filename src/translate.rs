@@ -16,7 +16,8 @@ use critical_section::Mutex;
 use defmt::{error, info};
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, Receiver, Sender};
+use embassy_sync::signal::Signal;
+use embassy_time::Duration;
 use embedded_io_async::{Read, Write};
 use mbedtls_rs::Tls;
 
@@ -232,10 +233,10 @@ pub fn extract_transcript(json: &str) -> Option<&str> {
 pub fn check_translation_cache(transcript: &str) -> Option<String> {
     critical_section::with(|cs| {
         let borrow = LAST_TRANSLATION.borrow_ref(cs);
-        if let Some((ref prev_input, ref prev_result)) = *borrow {
-            if prev_input == transcript {
-                return Some(prev_result.clone());
-            }
+        if let Some((ref prev_input, ref prev_result)) = *borrow
+            && prev_input == transcript
+        {
+            return Some(prev_result.clone());
         }
         None
     })
@@ -266,7 +267,7 @@ where
             });
         }
         Err(e) => {
-            info!("Translation failed: {:?}", e);
+            error!("Translation failed: {:?}", e);
         }
     }
 }
@@ -275,52 +276,87 @@ where
 // Translation task (channel-driven background worker)
 // ---------------------------------------------------------------------------
 
-/// Depth of the translation channel.  The idle-timeout debounce logic means
-/// at most one or two transcripts are in flight at a time; a depth of 2 gives
-/// headroom without wasting RAM.
-pub const TRANSLATE_CHANNEL_DEPTH: usize = 2;
+/// A message sent from the WebSocket receive loop to the translation task.
+pub enum TranscriptMessage {
+    /// A Deepgram JSON frame containing a (possibly partial) transcript.
+    DgJson(String),
+    /// No more frames are coming — translate the buffered transcript
+    /// immediately, skipping the idle-timeout debounce.
+    Flush,
+}
 
-/// Concrete channel type used for translation requests.
-pub type TranslateChannel = Channel<CriticalSectionRawMutex, String, TRANSLATE_CHANNEL_DEPTH>;
+/// Concrete signal type used for translation requests.
+/// "Latest wins" — the producer overwrites any pending value.
+pub type TranslateSignal = Signal<CriticalSectionRawMutex, TranscriptMessage>;
 
-/// The sender half passed to streaming functions so they can enqueue
-/// transcript JSON for translation.
-pub type TranslateSender =
-    Sender<'static, CriticalSectionRawMutex, String, TRANSLATE_CHANNEL_DEPTH>;
-
-/// Create the translation channel and spawn the background translation task.
+/// Create the translation signal and spawn the background translation task.
 ///
-/// Returns the [`Sender`] half that streaming code should use to enqueue
-/// transcript JSON for translation.
+/// Returns a `&'static TranslateSignal` that streaming code should use to
+/// send transcript messages for translation.
 pub fn spawn_translation_task(
-    channel: &'static TranslateChannel,
+    signal: &'static TranslateSignal,
     spawner: &Spawner,
     network: embassy_net::Stack<'static>,
     tls: &'static Tls<'static>,
-) -> TranslateSender {
-    let tx = channel.sender();
-    let rx = channel.receiver();
-
+) -> &'static TranslateSignal {
     spawner
-        .spawn(translation_task(rx, network, tls))
+        .spawn(translation_task(signal, network, tls))
         .expect("Failed to spawn translation task");
 
-    tx
+    signal
 }
 
-/// Background task that pulls Deepgram JSON off a channel, extracts the
-/// transcript, translates it (en -> es) via Google Translate, and caches
-/// the result.  Skips the TLS round-trip on cache hits.
+/// Maximum time to buffer partial transcripts before translating.
+/// Deepgram sends many partial frames in rapid succession; this deadline
+/// caps how long we wait so that translation is never delayed more than
+/// this duration after the first partial arrives, even during continuous
+/// speech.
+const TRANSLATE_DEBOUNCE_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Background task that receives Deepgram JSON via a signal, debounces
+/// rapid partial transcripts, then translates the latest one (en -> es)
+/// via Google Translate.  Skips the TLS round-trip on cache hits.
 #[embassy_executor::task]
 async fn translation_task(
-    rx: Receiver<'static, CriticalSectionRawMutex, String, TRANSLATE_CHANNEL_DEPTH>,
+    signal: &'static TranslateSignal,
     stack: embassy_net::Stack<'static>,
     tls: &'static Tls<'static>,
 ) {
     loop {
-        let json = rx.receive().await;
+        // Block until the first transcript arrives.
+        let mut pending_json = match signal.wait().await {
+            TranscriptMessage::DgJson(json) => json,
+            TranscriptMessage::Flush => continue,
+        };
 
-        let Some(transcript) = extract_transcript(&json) else {
+        // Debounce: keep buffering newer transcripts until the deadline
+        // expires or a Flush arrives.  The deadline is fixed from the
+        // moment the first partial arrives so that continuous speech
+        // cannot postpone translation indefinitely.
+        let deadline = embassy_time::Instant::now() + TRANSLATE_DEBOUNCE_DEADLINE;
+        loop {
+            let remaining = deadline.saturating_duration_since(embassy_time::Instant::now());
+            if remaining == Duration::from_ticks(0) {
+                info!("Debounce deadline reached — translating buffered transcript");
+                break;
+            }
+            match embassy_time::with_timeout(remaining, signal.wait()).await {
+                Err(_timeout) => {
+                    info!("Debounce deadline reached — translating buffered transcript");
+                    break;
+                }
+                Ok(TranscriptMessage::DgJson(json)) => {
+                    // A newer transcript arrived — buffer it instead.
+                    pending_json = json;
+                }
+                Ok(TranscriptMessage::Flush) => {
+                    info!("Final transcript received — translating immediately");
+                    break;
+                }
+            }
+        }
+
+        let Some(transcript) = extract_transcript(&pending_json) else {
             info!("No transcript field found in response");
             continue;
         };
