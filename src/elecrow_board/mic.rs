@@ -1,8 +1,10 @@
-use esp_hal::Blocking;
+extern crate alloc;
+
+use defmt::info;
+use esp_hal::Async;
 use esp_hal::dma::DmaDescriptor;
 use esp_hal::i2s::master::{Config, DataFormat, I2s, I2sRx};
 use esp_hal::peripherals::{DMA_CH0, GPIO9, GPIO10, I2S0};
-use defmt::info;
 use esp_hal::time::Rate;
 
 pub struct MicHardware<'a> {
@@ -49,7 +51,7 @@ pub fn init<'d>(
     mic_hardware: MicHardware<'d>,
     dma_rx_descriptors: &'static mut [DmaDescriptor],
     pcm_sample_rate: u32,
-) -> I2sRx<'d, Blocking> {
+) -> I2sRx<'d, Async> {
     // Step 1: Init I2S in TDM mode via esp-hal.
     // Derive i2s_rate from the target PCM output rate (see doc comment for full derivation):
     //   i2s_rate = pcm_sample_rate * DSR_DIVISOR / BITS_PER_FRAME
@@ -77,12 +79,15 @@ pub fn init<'d>(
     )
     .expect("I2S init failed");
 
-    // Step 2: Patch I2S0 registers to switch from TDM → PDM RX mode.
-    enable_pdm_rx();
-
-    // Step 3: Build RX channel with correct GPIO mapping.
+    // Step 2: Convert to async mode and build RX channel with correct GPIO mapping.
+    // into_async() only converts DMA channel types — no I2S register changes.
     // On ESP32-S3, PDM clock is output on the WS signal path (not BCLK).
-    i2s.i2s_rx
+    //
+    // NOTE: PDM register patching (enable_pdm_rx) is deferred until after
+    // read_dma_circular_async() starts DMA, because that call's internal reset_rx()
+    // invalidates the rx_update config latch. See mic_read_task().
+    i2s.into_async()
+        .i2s_rx
         .with_ws(mic_hardware.clk_pin)
         .with_din(mic_hardware.din_pin)
         .build(dma_rx_descriptors)
@@ -96,8 +101,9 @@ pub fn init<'d>(
 /// - Set down-sampling rate to DSR_8S (÷64)
 /// - Set `rx_half_sample_bits = 15` (16 − 1), as ESP-IDF does for PDM
 ///
-/// Must be called after `I2s::new()` and before starting DMA.
-fn enable_pdm_rx() {
+/// Must be called after `read_dma_circular_async()` starts the DMA transfer, so
+/// that the rx_update latch is applied fresh (after reset_rx() inside that call).
+pub fn enable_pdm_rx() {
     // Safety: We have exclusive ownership of the I2S0 peripheral (it was moved into
     // `I2s::new` above). These are the same register writes ESP-IDF performs for PDM RX.
     let i2s0 = unsafe { &*esp32s3::I2S0::PTR };
@@ -118,4 +124,91 @@ fn enable_pdm_rx() {
     // Latch register changes into the I2S clock domain via rx_update (bit 8).
     i2s0.rx_conf().modify(|_, w| w.rx_update().clear_bit());
     i2s0.rx_conf().modify(|_, w| w.rx_update().set_bit());
+}
+
+/// Background Embassy task that reads PCM samples from the mic via async circular DMA
+/// and logs a rolling RMS / dBFS level.
+///
+/// `available().await` and `pop().await` are interrupt-driven (via `DmaRxDoneChFuture`),
+/// so this task sleeps while waiting for data and does not starve other Embassy tasks.
+#[embassy_executor::task]
+pub async fn mic_read_task(
+    i2s_rx: I2sRx<'static, Async>,
+    rx_buffer: &'static mut [u8],
+) {
+    info!("Mic task: starting async circular DMA...");
+
+    let mut transfer = i2s_rx
+        .read_dma_circular_async(rx_buffer)
+        .expect("Failed to start I2S async circular DMA read");
+
+    // Patch I2S0 from TDM → PDM RX mode AFTER DMA starts. This must happen here
+    // (not in init) because read_dma_circular_async's internal reset_rx() invalidates
+    // the rx_update config latch. A few samples of TDM noise before the patch is harmless.
+    enable_pdm_rx();
+
+    // Heap-allocated pop buffer — must be >= max available() to satisfy pop() API
+    let mut buf = alloc::vec![0u8; 32000];
+
+    // Rolling RMS over the last ~100 ms of audio.
+    // At 16 kHz mono 16-bit: 100 ms = 1600 samples.
+    const RMS_WINDOW_SAMPLES: usize = 1600;
+    let mut ring = alloc::vec![0i16; RMS_WINDOW_SAMPLES];
+    let mut ring_pos: usize = 0;
+    let mut sum_sq: u64 = 0; // running sum of squares over the window
+
+    loop {
+        match transfer.available().await {
+            Err(e) => {
+                info!("Mic task: DMA error: {}", e);
+                // break;
+            }
+            Ok(avail) => {
+                let read = transfer
+                    .pop(&mut buf[..avail])
+                    .await
+                    .expect("pop failed");
+
+                // Feed samples into the rolling window and update sum_sq
+                for sample_bytes in buf[..read].chunks_exact(2) {
+                    let sample = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
+
+                    // Remove oldest sample's contribution
+                    let old = ring[ring_pos] as i64;
+                    sum_sq -= (old * old) as u64;
+
+                    // Insert new sample
+                    ring[ring_pos] = sample;
+                    let new = sample as i64;
+                    sum_sq += (new * new) as u64;
+
+                    ring_pos = (ring_pos + 1) % RMS_WINDOW_SAMPLES;
+                }
+
+                let mean_sq = sum_sq / RMS_WINDOW_SAMPLES as u64;
+
+                // dBFS = 20 * log10(rms / 32767) = 10 * log10(mean_sq / 32767^2)
+                let dbfs = if mean_sq == 0 {
+                    -96.0_f32
+                } else {
+                    let mean_sq_f = mean_sq as f32;
+                    // 32767^2 = 1_073_676_289
+                    10.0 * libm::log10f(mean_sq_f / 1_073_676_289.0)
+                };
+
+                // RMS for reference
+                let rms = libm::sqrtf(mean_sq as f32) as u32;
+
+                // Log dBFS as fixed-point tenths to avoid defmt float formatting
+                let dbfs_int = dbfs as i32;
+                let dbfs_frac = (libm::fabsf(dbfs * 10.0) as u32) % 10;
+                info!(
+                    "Mic: read={},\trms={},\tdBFS={}.{}",
+                    read, rms, dbfs_int, dbfs_frac
+                );
+            }
+        }
+    }
+
+    info!("Mic task exited.");
 }
