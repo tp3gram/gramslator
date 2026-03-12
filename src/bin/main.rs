@@ -15,6 +15,8 @@ use embassy_executor::Spawner;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::dma_circular_buffers;
+use esp_hal::interrupt::software::SoftwareInterruptControl;
+use esp_hal::system::Stack;
 use esp_hal::timer::timg::TimerGroup;
 use gramslator::elecrow_board;
 use gramslator::net;
@@ -29,7 +31,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
-async fn main(spawner: Spawner) -> ! {
+async fn main(spawner: Spawner) {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
@@ -62,6 +64,45 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
+    // ---- Analog switch: route GPIO9/10 to microphone -------------------------
+
+    let _mic_switch =
+        elecrow_board::mic_wireless_module_switch::MicWirelessModuleSwitchHardware::init(
+            peripherals.GPIO45,
+            elecrow_board::mic_wireless_module_switch::SwitchState::Mic,
+        );
+
+    // ---- Microphone (I2S RX) -------------------------------------------------
+
+    let (rx_buffer, rx_descriptors, _, _) = dma_circular_buffers!(32000, 0);
+
+    let mut i2s_rx = elecrow_board::mic::init(
+        elecrow_board::mic::MicHardware {
+            i2s: peripherals.I2S0,
+            dma_channel: peripherals.DMA_CH0,
+            clk_pin: peripherals.GPIO9,
+            din_pin: peripherals.GPIO10,
+        },
+        rx_descriptors,
+        8_000,
+    );
+
+    // ---- Second core: blocking DMA read loop ---------------------------------
+
+    let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    static mut CORE1_STACK: Stack<8192> = Stack::new();
+
+    // Start blocking DMA read loop on second core
+    esp_rtos::start_second_core(
+        peripherals.CPU_CTRL,
+        software_interrupt.software_interrupt0,
+        software_interrupt.software_interrupt1,
+        unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+        move || {
+            elecrow_board::mic::read_mic_dma_loop_blocking(&mut i2s_rx, rx_buffer);
+        },
+    );
+
     // ---- WiFi -----------------------------------------------------------------
 
     let network = elecrow_board::network::init(
@@ -74,42 +115,12 @@ async fn main(spawner: Spawner) -> ! {
     // ---- TLS initialization ---------------------------------------------------
 
     // True Random Number Generator + mbedTLS singleton
-    let tls = net::init_tls(net::TlsHardware {
+    let tls = net::init_global_tls(net::TlsHardware {
         rng: peripherals.RNG,
         adc1: peripherals.ADC1,
     });
 
-    // elecrow_board::network::test_stream(network, &tls).await;
+    let mut conn = net::deepgram_create_listen_socket(network, &tls).await;
 
-    // ---- Analog switch: route GPIO9/10 to microphone -------------------------
-
-    let _mic_switch = elecrow_board::mic_wireless_module_switch::MicWirelessModuleSwitchHardware::init(
-        peripherals.GPIO45,
-        elecrow_board::mic_wireless_module_switch::SwitchState::Mic,
-    );
-
-    // ---- Microphone (I2S RX) -------------------------------------------------
-
-    let (rx_buffer, rx_descriptors, _, _) = dma_circular_buffers!(32000, 0);
-
-    let i2s_rx = elecrow_board::mic::init(
-        elecrow_board::mic::MicHardware {
-            i2s: peripherals.I2S0,
-            dma_channel: peripherals.DMA_CH0,
-            clk_pin: peripherals.GPIO9,
-            din_pin: peripherals.GPIO10,
-        },
-        rx_descriptors,
-        16_000,
-    );
-
-    info!("Microphone I2S configured, spawning read task...");
-
-    spawner
-        .spawn(elecrow_board::mic::read_task(i2s_rx, rx_buffer))
-        .expect("Failed to spawn mic read task");
-
-    loop {
-        embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
-    }
+    elecrow_board::mic::send_audio_from_mic_pipe(&mut conn).await;
 }

@@ -1653,6 +1653,7 @@ dependencies = [
  "edge-ws",
  "embassy-executor",
  "embassy-net",
+ "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-graphics",
  "embedded-hal 0.2.7",

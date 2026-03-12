@@ -28,6 +28,21 @@ static RX_BUFS: [StaticCell<[u8; TCP_RX_SIZE]>; MAX_CONNECTIONS] =
 static TX_BUFS: [StaticCell<[u8; TCP_TX_SIZE]>; MAX_CONNECTIONS] =
     [const { StaticCell::new() }; MAX_CONNECTIONS];
 
+static DEEPGRAM_LISTEN_WEBSOCKET_REQUEST: &str = concat!(
+    "GET /v2/listen?eot_threshold=0.7&eot_timeout_ms=5000&model=flux-general-en&encoding=linear16&sample_rate=8000 HTTP/1.1\r\n",
+    "Host: ",
+    env!("DEEPGRAM_HOST"),
+    "\r\n",
+    "Upgrade: websocket\r\n",
+    "Connection: Upgrade\r\n",
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+    "Sec-WebSocket-Version: 13\r\n",
+    "Authorization: Token ",
+    env!("DEEPGRAM_TOKEN"),
+    "\r\n",
+    "\r\n",
+);
+
 // ---- Error type ------------------------------------------------------------
 
 #[derive(Debug, defmt::Format)]
@@ -64,14 +79,14 @@ pub struct Connection<'a> {
 impl<'a> Connection<'a> {
     /// Resolve `host`, claim a free buffer pair, open a TCP connection
     /// (with retries), create a TLS session, and perform the handshake.
-    pub async fn init_tls(
+    pub async fn open_tcp_connection_with_tls(
         network: embassy_net::Stack<'static>,
         host: &str,
         port: u16,
         tls: &'a Tls<'_>,
     ) -> Result<Self, ConnectionError> {
         // 1. DNS + TCP connect (shared logic)
-        let socket = Self::connect_tcp(network, host, port).await?;
+        let socket = Self::connect_tcp_with_timeout(network, host, port).await?;
 
         // 2. Build TLS config
         //    server_name must outlive the Session, so we leak a tiny heap CString.
@@ -104,19 +119,19 @@ impl<'a> Connection<'a> {
 
     /// Resolve `host`, claim a free buffer pair, and open a plain TCP
     /// connection (with retries). No TLS handshake is performed.
-    pub async fn init_tcp(
+    pub async fn open_tcp_connection(
         network: embassy_net::Stack<'static>,
         host: &str,
         port: u16,
     ) -> Result<Self, ConnectionError> {
-        let socket = Self::connect_tcp(network, host, port).await?;
+        let socket = Self::connect_tcp_with_timeout(network, host, port).await?;
         Ok(Self {
             inner: ConnectionInner::Tcp(socket),
         })
     }
 
     /// Shared helper: DNS resolution, buffer claim, TCP connect with retries.
-    async fn connect_tcp(
+    async fn connect_tcp_with_timeout(
         network: embassy_net::Stack<'static>,
         host: &str,
         port: u16,
@@ -136,7 +151,7 @@ impl<'a> Connection<'a> {
         info!("TCP connecting to {}:{}...", remote_ip, port);
         let mut last_err = None;
         for attempt in 1..=MAX_TCP_RETRIES {
-            match tcp_connect(&mut socket, remote).await {
+            match single_tcp_connect(&mut socket, remote).await {
                 Ok(()) => {
                     last_err = None;
                     break;
@@ -256,7 +271,7 @@ pub struct TlsHardware {
 /// Initialise the True Random Number Generator and create the mbedTLS
 /// singleton.  Must only be called once (the static cells will panic on a
 /// second call).
-pub fn init_tls(hardware: TlsHardware) -> Tls<'static> {
+pub fn init_global_tls(hardware: TlsHardware) -> Tls<'static> {
     // TrngSource configures the RNG peripheral; it must stay alive.
     static TRNG_SOURCE: StaticCell<TrngSource<'static>> = StaticCell::new();
     static TRNG: StaticCell<Trng> = StaticCell::new();
@@ -290,7 +305,7 @@ pub async fn resolve_dns(
 
 /// Attempt a single TCP connection. On failure, resets the socket
 /// (close -> 1 s delay -> abort) so the caller can retry immediately.
-pub async fn tcp_connect(
+pub async fn single_tcp_connect(
     socket: &mut TcpSocket<'_>,
     remote: (IpAddress, u16),
 ) -> Result<(), ConnectError> {
@@ -313,9 +328,48 @@ pub fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+async fn deepgram_tcp_connect<'a>(
+    network: embassy_net::Stack<'static>,
+    tls: &'a Tls<'static>,
+) -> Connection<'a> {
+    // DEEPGRAM_USE_TLS: "false" disables TLS (HTTP), defaults to "true" (HTTPS).
+    // DEEPGRAM_PORT:    override the port, defaults to 443.
+    const DEEPGRAM_USE_TLS: bool = konst::result::unwrap_ctx!(konst::primitive::parse_bool(
+        match option_env!("DEEPGRAM_USE_TLS") {
+            Some(v) => v,
+            None => "true",
+        }
+    ));
+
+    const DEEPGRAM_PORT: u16 = konst::result::unwrap_ctx!(konst::primitive::parse_u16(
+        match option_env!("DEEPGRAM_PORT") {
+            Some(v) => v,
+            None => "443",
+        }
+    ));
+
+    if DEEPGRAM_USE_TLS {
+        info!(
+            "Connecting to Deepgram over HTTPS (port {})...",
+            DEEPGRAM_PORT
+        );
+        Connection::open_tcp_connection_with_tls(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT, tls)
+            .await
+            .expect("Failed to establish TLS connection")
+    } else {
+        info!(
+            "Connecting to Deepgram over HTTP (port {})...",
+            DEEPGRAM_PORT
+        );
+        Connection::open_tcp_connection(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT)
+            .await
+            .expect("Failed to establish TCP connection")
+    }
+}
+
 /// Perform the HTTP -> WebSocket upgrade handshake over an established
 /// connection (typically TLS). Panics on failure.
-pub async fn websocket_upgrade<S>(session: &mut S)
+pub async fn deepgram_listen_socket_upgrade<S>(session: &mut S)
 where
     S: Read + Write,
     S::Error: core::fmt::Debug,
@@ -323,16 +377,7 @@ where
     info!("WebSocket upgrade...");
 
     // Use a fixed Sec-WebSocket-Key (fine for a proof of concept)
-    let upgrade_request: &[u8] = concat!(
-        "GET /v2/listen?eot_threshold=0.7&eot_timeout_ms=5000&model=flux-general-en&encoding=linear16&sample_rate=8000 HTTP/1.1\r\n",
-        "Host: ", env!("DEEPGRAM_HOST"), "\r\n",
-        "Upgrade: websocket\r\n",
-        "Connection: Upgrade\r\n",
-        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
-        "Sec-WebSocket-Version: 13\r\n",
-        "Authorization: Token ", env!("DEEPGRAM_TOKEN"), "\r\n",
-        "\r\n",
-    ).as_bytes();
+    let upgrade_request: &[u8] = DEEPGRAM_LISTEN_WEBSOCKET_REQUEST.as_bytes();
 
     session
         .write_all(upgrade_request)
@@ -376,4 +421,18 @@ where
         }
     }
     info!("WebSocket connected!");
+}
+
+pub async fn deepgram_create_listen_socket<'a>(
+    network: embassy_net::Stack<'static>,
+    tls: &'a Tls<'static>,
+) -> Connection<'a> {
+    // Wait for WiFi + DHCP before attempting any network I/O.
+    network.wait_config_up().await;
+
+    let mut conn: Connection<'_> = deepgram_tcp_connect(network, tls).await;
+
+    deepgram_listen_socket_upgrade(&mut conn).await;
+
+    conn
 }

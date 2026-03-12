@@ -1,6 +1,8 @@
 extern crate alloc;
 
-use defmt::info;
+use defmt::{error, info};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::pipe::Pipe;
 use esp_hal::Blocking;
 use esp_hal::dma::DmaDescriptor;
 use esp_hal::i2s::master::{Config, DataFormat, I2s, I2sRx};
@@ -65,7 +67,7 @@ pub fn init<'d>(
     //   bclk_div = mclk / bclk = 256 / 32 = 8   (PDM minimum)
     // With DSR_8S (÷64): PCM output = bclk / 64 = pcm_sample_rate.
     const BITS_PER_FRAME: u32 = 32; // Data16Channel16: 2 channels × 16 bits
-    const DSR_DIVISOR: u32 = 64;    // DSR_8S mode (rx_pdm_sinc_dsr_16_en = 0)
+    const DSR_DIVISOR: u32 = 64; // DSR_8S mode (rx_pdm_sinc_dsr_16_en = 0)
     let i2s_sample_rate = pcm_sample_rate * DSR_DIVISOR / BITS_PER_FRAME;
     let pdm_clock = i2s_sample_rate * BITS_PER_FRAME;
 
@@ -94,83 +96,6 @@ pub fn init<'d>(
         .build(dma_rx_descriptors)
 }
 
-/// Embassy task that runs the circular DMA read loop, computing a rolling RMS over ~100 ms
-/// of 16 kHz mono 16-bit audio and logging dBFS.
-#[embassy_executor::task]
-pub async fn read_task(
-    mut i2s_rx: I2sRx<'static, Blocking>,
-    rx_buffer: &'static mut [u8; DMA_BUF_SIZE],
-) {
-    info!("Microphone read task started, beginning circular DMA...");
-
-    let mut transfer = i2s_rx
-        .read_dma_circular(rx_buffer)
-        .expect("Failed to start I2S circular DMA read");
-
-    // Heap-allocated pop buffer — must be >= max available() to satisfy pop() API
-    let mut buf = alloc::vec![0u8; 32000];
-
-    // Rolling RMS over the last ~100 ms of audio.
-    // At ~39 kHz mono 16-bit: 100 ms ≈ 3906 samples.
-    const RMS_WINDOW_SAMPLES: usize = 3906;
-    let mut ring = alloc::vec![0i16; RMS_WINDOW_SAMPLES];
-    let mut ring_pos: usize = 0;
-    let mut sum_sq: u64 = 0; // running sum of squares over the window
-
-    loop {
-        match transfer.available() {
-            Err(e) => {
-                info!("DMA error: {}", e);
-                break;
-            }
-            Ok(0) => {} // nothing ready yet
-            Ok(_) => {
-                let read = transfer.pop(&mut buf).expect("pop failed");
-
-                // Feed samples into the rolling window and update sum_sq
-                for sample_bytes in buf[..read].chunks_exact(2) {
-                    let sample = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
-
-                    // Remove oldest sample's contribution
-                    let old = ring[ring_pos] as i64;
-                    sum_sq -= (old * old) as u64;
-
-                    // Insert new sample
-                    ring[ring_pos] = sample;
-                    let new = sample as i64;
-                    sum_sq += (new * new) as u64;
-
-                    ring_pos = (ring_pos + 1) % RMS_WINDOW_SAMPLES;
-                }
-
-                let mean_sq = sum_sq / RMS_WINDOW_SAMPLES as u64;
-
-                // dBFS = 20 * log10(rms / 32767) = 10 * log10(mean_sq / 32767^2)
-                let dbfs = if mean_sq == 0 {
-                    -96.0_f32
-                } else {
-                    let mean_sq_f = mean_sq as f32;
-                    // 32767^2 = 1_073_676_289
-                    10.0 * libm::log10f(mean_sq_f / 1_073_676_289.0)
-                };
-
-                // RMS for reference
-                let rms = libm::sqrtf(mean_sq as f32) as u32;
-
-                // Log dBFS as fixed-point tenths to avoid defmt float formatting
-                let dbfs_int = dbfs as i32;
-                let dbfs_frac = (libm::fabsf(dbfs * 10.0) as u32) % 10;
-                info!(
-                    "Mic: read={},\trms={},\tdBFS={}.{}",
-                    read, rms, dbfs_int, dbfs_frac
-                );
-            }
-        }
-    }
-
-    info!("DMA loop exited.");
-}
-
 /// Patch I2S0 registers to switch from TDM to PDM RX mode.
 ///
 /// Replicates the register writes from ESP-IDF's `i2s_pdm.c` / `i2s_ll.h`:
@@ -187,18 +112,83 @@ fn enable_pdm_rx() {
 
     // rx_conf: flip mode from TDM to PDM with hardware decimation
     i2s0.rx_conf().modify(|_, w| {
-        w.rx_pdm_en().set_bit();                // bit 20: enable PDM RX
-        w.rx_tdm_en().clear_bit();              // bit 19: disable TDM RX
-        w.rx_pdm2pcm_en().set_bit();            // bit 21: enable PDM→PCM filter
-        w.rx_pdm_sinc_dsr_16_en().clear_bit()   // bit 22: DSR_8S (÷64 down-sampling)
+        w.rx_pdm_en().set_bit(); // bit 20: enable PDM RX
+        w.rx_tdm_en().clear_bit(); // bit 19: disable TDM RX
+        w.rx_pdm2pcm_en().set_bit(); // bit 21: enable PDM→PCM filter
+        w.rx_pdm_sinc_dsr_16_en().clear_bit() // bit 22: DSR_8S (÷64 down-sampling)
     });
 
     // rx_conf1: PDM requires half_sample_bits = 16 − 1 = 15
     i2s0.rx_conf1().modify(|_, w| unsafe {
-        w.rx_half_sample_bits().bits(15)        // bits 18:23
+        w.rx_half_sample_bits().bits(15) // bits 18:23
     });
 
     // Latch register changes into the I2S clock domain via rx_update (bit 8).
     i2s0.rx_conf().modify(|_, w| w.rx_update().clear_bit());
     i2s0.rx_conf().modify(|_, w| w.rx_update().set_bit());
+}
+
+/// Async pipe bridging the blocking DMA read loop and async consumers.
+/// The blocking side pushes via `try_write`; async readers await via [`read_mic`].
+pub static MIC_PIPE: Pipe<CriticalSectionRawMutex, DMA_BUF_SIZE> = Pipe::new();
+
+/// Starts circular DMA and runs a blocking read loop, pushing popped audio
+/// data into [`MIC_PIPE`]. Does not return unless a DMA error occurs.
+pub fn read_mic_dma_loop_blocking(
+    i2s_rx: &mut I2sRx<'_, Blocking>,
+    rx_buffer: &mut [u8; DMA_BUF_SIZE],
+) {
+    info!("Mic DMA");
+
+    let mut transfer = i2s_rx
+        .read_dma_circular(rx_buffer)
+        .expect("Failed to start I2S circular DMA read");
+
+    let mut buf = alloc::vec![0u8; DMA_BUF_SIZE];
+
+    loop {
+        match transfer.available() {
+            Err(e) => {
+                info!("DMA error: {}", e);
+                break;
+            }
+            Ok(0) => {} // nothing ready yet
+            Ok(_) => {
+                let read = transfer.pop(&mut buf).expect("pop failed");
+                info!("DMA read: {}", read);
+
+                // Non-blocking write into the pipe; drops data if the pipe is full.
+                let _ = MIC_PIPE.try_write(&buf[..read]).map_err(|e| {
+                    error!("Pipe write error: {}", e);
+                });
+            }
+        }
+    }
+
+    info!("DMA loop exited.");
+}
+
+/// Reads audio from [`MIC_PIPE`] and sends it over a WebSocket connection
+/// as binary frames. Does not return unless a write error occurs.
+pub async fn send_audio_from_mic_pipe<S>(conn: &mut S)
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+{
+    info!("Pipe read: start");
+    let mut buf = [0u8; 4096];
+
+    loop {
+        let n = MIC_PIPE.read(&mut buf[..]).await;
+        info!("send_audio_from_mic_pipe: read {} bytes", n);
+
+        edge_ws::io::send(
+            &mut *conn,
+            edge_ws::FrameType::Binary(false),
+            Some(0),
+            &buf[..n],
+        )
+        .await
+        .expect("Failed to send audio chunk");
+        conn.flush().await.expect("Failed to flush audio chunk");
+    }
 }

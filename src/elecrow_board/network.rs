@@ -55,11 +55,8 @@ async fn wifi_connect_task(
             MAX_WIFI_RETRIES
         );
 
-        let connect_result = embassy_time::with_timeout(
-            WIFI_CONNECT_TIMEOUT,
-            wifi_controller.connect_async(),
-        )
-        .await;
+        let connect_result =
+            embassy_time::with_timeout(WIFI_CONNECT_TIMEOUT, wifi_controller.connect_async()).await;
 
         match connect_result {
             Ok(Ok(())) => {
@@ -164,48 +161,7 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
     const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
     const WAV_HEADER_SIZE: usize = 44;
 
-    // Wait for WiFi + DHCP before attempting any network I/O.
-    network.wait_config_up().await;
-
-    // ---- Deepgram connection ----------------------------------------------------
-    //
-    // DEEPGRAM_USE_TLS: "false" disables TLS (HTTP), defaults to "true" (HTTPS).
-    // DEEPGRAM_PORT:    override the port, defaults to 443.
-    const DEEPGRAM_USE_TLS: bool = konst::result::unwrap_ctx!(konst::primitive::parse_bool(
-        match option_env!("DEEPGRAM_USE_TLS") {
-            Some(v) => v,
-            None => "true",
-        }
-    ));
-
-    const DEEPGRAM_PORT: u16 = konst::result::unwrap_ctx!(konst::primitive::parse_u16(
-        match option_env!("DEEPGRAM_PORT") {
-            Some(v) => v,
-            None => "443",
-        }
-    ));
-
-    let mut conn = if DEEPGRAM_USE_TLS {
-        info!(
-            "Connecting to Deepgram over HTTPS (port {})...",
-            DEEPGRAM_PORT
-        );
-        Connection::init_tls(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT, tls)
-            .await
-            .expect("Failed to establish TLS connection")
-    } else {
-        info!(
-            "Connecting to Deepgram over HTTP (port {})...",
-            DEEPGRAM_PORT
-        );
-        Connection::init_tcp(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT)
-            .await
-            .expect("Failed to establish TCP connection")
-    };
-
-    // ---- WebSocket upgrade ----------------------------------------------------
-
-    net::websocket_upgrade(&mut conn).await;
+    let mut conn = net::deepgram_create_listen_socket(network, tls).await;
 
     // ---- Stream audio ---------------------------------------------------------
 
@@ -360,7 +316,13 @@ async fn translate_response(stack: embassy_net::Stack<'static>, tls: &Tls<'_>, j
         return;
     }
 
-    let mut conn = match Connection::init_tls(stack, env!("GOOGLE_TRANSLATE_HOST"), 443, tls).await
+    let mut conn = match Connection::open_tcp_connection_with_tls(
+        stack,
+        env!("GOOGLE_TRANSLATE_HOST"),
+        443,
+        tls,
+    )
+    .await
     {
         Ok(c) => c,
         Err(e) => {
