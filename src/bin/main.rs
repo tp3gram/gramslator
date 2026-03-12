@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 #![no_std]
 #![no_main]
 #![deny(
@@ -34,8 +35,29 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // mbedTLS alone needs 40+ KB for session state, so we use regular SRAM.
-    esp_alloc::heap_allocator!(size: 150_000);
+    // ---- Heap setup -----------------------------------------------------------
+    //
+    // The global allocator tries regions in registration order.  PSRAM is
+    // registered first so the default path (Box::new, Vec::new, String::new,
+    // and — crucially — mbedTLS's internal malloc) lands in the 8 MB PSRAM
+    // pool.  The small internal SRAM region is registered second as a fallback.
+    //
+    // For explicit placement use the standard allocator_api (enabled by the
+    // `nightly` feature on esp-alloc):
+    //
+    //   Box::new_in(value, esp_alloc::InternalMemory)   // force SRAM
+    //   Box::new_in(value, esp_alloc::ExternalMemory)   // force PSRAM
+    //   Vec::<u8>::new_in(esp_alloc::InternalMemory)    // force SRAM
+    //
+    // ⚠ Atomic operations are unreliable on PSRAM for ESP32-S3.  Any
+    //   heap-allocated Atomic* types MUST use InternalMemory explicitly.
+    //   (Stack/static atomics are fine — they live in SRAM regardless.)
+
+    // 1️⃣  External PSRAM (8 MB) — default for all heap allocations.
+    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+
+    // 2️⃣  Internal SRAM (72 KB) — fallback & explicit via InternalMemory.
+    esp_alloc::heap_allocator!(size: 72_000);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
