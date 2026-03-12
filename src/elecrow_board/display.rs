@@ -46,8 +46,8 @@ pub struct DisplaySPIBus<'a> {
 
 pub struct DisplayHardware<'a> {
     pub spi: DisplaySPIBus<'a>,
-    pub pin_tft_power: GPIO14<'a>,
-    pub pin_backlight: GPIO38<'a>,
+    pub tft_power_pin: GPIO14<'a>,
+    pub backlight_pin: GPIO38<'a>,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,13 +224,13 @@ pub fn init<'a>(
 ) -> AsyncDisplay<'a> {
     // Power & backlight on
     let mut tft_power = Output::new(
-        display_hardware.pin_tft_power,
+        display_hardware.tft_power_pin,
         Level::Low,
         OutputConfig::default(),
     );
     tft_power.set_high();
     let mut backlight = Output::new(
-        display_hardware.pin_backlight,
+        display_hardware.backlight_pin,
         Level::Low,
         OutputConfig::default(),
     );

@@ -1222,9 +1222,9 @@ dependencies = [
 
 [[package]]
 name = "esp-idf-sys"
-version = "0.36.1"
+version = "0.37.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb77a3d02b579a60a811ed9be22b78c5e794bc492d833ee7fc44d3a0155885e1"
+checksum = "f8df62993f242eb05d9ddb63e503624fb22f24a11d6c680e85cf0169ee14421f"
 dependencies = [
  "anyhow",
  "build-time",
@@ -1677,7 +1677,9 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "esp32s3",
  "konst",
+ "libm",
  "mbedtls-rs",
  "mipidsi",
  "smoltcp",
@@ -2009,7 +2011,7 @@ checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
 [[package]]
 name = "mbedtls-rs"
 version = "0.1.0"
-source = "git+https://github.com/esp-rs/mbedtls-rs#456e389b12305438fdcab829d620c5634ddfea32"
+source = "git+https://github.com/esp-rs/mbedtls-rs#8b00d965aba67688caf5e40576f531fd5ac35b93"
 dependencies = [
  "critical-section",
  "defmt 1.0.1",
@@ -2024,7 +2026,7 @@ dependencies = [
 [[package]]
 name = "mbedtls-rs-sys"
 version = "0.1.0"
-source = "git+https://github.com/esp-rs/mbedtls-rs#456e389b12305438fdcab829d620c5634ddfea32"
+source = "git+https://github.com/esp-rs/mbedtls-rs#8b00d965aba67688caf5e40576f531fd5ac35b93"
 dependencies = [
  "anyhow",
  "bindgen 0.72.1",
@@ -2149,9 +2151,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.3"
+version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "once_cell_polyfill"

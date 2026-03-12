@@ -8,13 +8,18 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+extern crate alloc;
+
 mod display;
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
+use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
+use esp_hal::dma_circular_buffers;
+use esp_hal::interrupt::software::SoftwareInterruptControl;
+use esp_hal::system::Stack;
 use esp_hal::timer::timg::TimerGroup;
 use gramslator::elecrow_board;
 use gramslator::net;
@@ -35,8 +40,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // generator version: 1.2.0
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
@@ -69,11 +72,71 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
-    // ---- Heap diagnostics -------------------------------------------------------
-    info!(
-        "Heap free: {} bytes, used: {} bytes",
-        esp_alloc::HEAP.free(),
-        esp_alloc::HEAP.used()
+    // ---- Analog switch: route GPIO9/10 to microphone -------------------------
+
+    let _mic_switch =
+        elecrow_board::mic_wireless_module_switch::MicWirelessModuleSwitchHardware::init(
+            peripherals.GPIO45,
+            elecrow_board::mic_wireless_module_switch::SwitchState::Mic,
+        );
+
+    // ---- Microphone (I2S RX) -------------------------------------------------
+
+    let (rx_buffer, rx_descriptors, _, _) = dma_circular_buffers!(32000, 0);
+
+    let mut i2s_rx = elecrow_board::mic::init(
+        elecrow_board::mic::MicHardware {
+            i2s: peripherals.I2S0,
+            dma_channel: peripherals.DMA_CH0,
+            clk_pin: peripherals.GPIO9,
+            din_pin: peripherals.GPIO10,
+        },
+        rx_descriptors,
+        8_000,
+    );
+
+    // ---- Second core: blocking DMA read loop ---------------------------------
+
+    let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    static mut CORE1_STACK: Stack<8192> = Stack::new();
+
+    // Start blocking DMA read loop on second core
+    esp_rtos::start_second_core(
+        peripherals.CPU_CTRL,
+        software_interrupt.software_interrupt0,
+        software_interrupt.software_interrupt1,
+        unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+        move || {
+            elecrow_board::mic::read_mic_dma_loop_blocking(&mut i2s_rx, rx_buffer);
+        },
+    );
+
+    // ---- Display (SPI + async DMA) — spawned in parallel on core 0 -----------
+
+    let (disp_rx_buffer, disp_rx_descriptors, disp_tx_buffer, disp_tx_descriptors) =
+        esp_hal::dma_buffers!(4, 4092);
+    let dma_rx_buf =
+        esp_hal::dma::DmaRxBuf::new(disp_rx_descriptors, disp_rx_buffer).expect("DMA RX buf");
+    let dma_tx_buf =
+        esp_hal::dma::DmaTxBuf::new(disp_tx_descriptors, disp_tx_buffer).expect("DMA TX buf");
+
+    let delay = esp_hal::delay::Delay::new();
+    let hw_display = elecrow_board::display::init(
+        elecrow_board::display::DisplayHardware {
+            spi: elecrow_board::display::DisplaySPIBus {
+                spi_peripheral: peripherals.SPI2,
+                sck: peripherals.GPIO42,
+                mosi: peripherals.GPIO39,
+                data_command: peripherals.GPIO41,
+                chip_select: peripherals.GPIO40,
+            },
+            tft_power_pin: peripherals.GPIO14,
+            backlight_pin: peripherals.GPIO38,
+        },
+        peripherals.DMA_CH1,
+        dma_rx_buf,
+        dma_tx_buf,
+        delay,
     );
 
     // ---- WiFi -----------------------------------------------------------------
@@ -91,37 +154,10 @@ async fn main(spawner: Spawner) -> ! {
     // Stored in a StaticCell so the spawned tasks can hold a
     // `&'static Tls<'static>` reference.
     static TLS: StaticCell<mbedtls_rs::Tls<'static>> = StaticCell::new();
-    let tls: &'static mbedtls_rs::Tls<'static> = TLS.init(net::init_tls(net::TlsHardware {
+    let tls: &'static mbedtls_rs::Tls<'static> = TLS.init(net::init_global_tls(net::TlsHardware {
         rng: peripherals.RNG,
         adc1: peripherals.ADC1,
     }));
-
-    // ---- Display (SPI + async DMA) ---------------------------------------------
-    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
-        esp_hal::dma_buffers!(4, 4092);
-    let dma_rx_buf =
-        esp_hal::dma::DmaRxBuf::new(rx_descriptors, rx_buffer).expect("DMA RX buf");
-    let dma_tx_buf =
-        esp_hal::dma::DmaTxBuf::new(tx_descriptors, tx_buffer).expect("DMA TX buf");
-
-    let delay = esp_hal::delay::Delay::new();
-    let hw_display = elecrow_board::display::init(
-        elecrow_board::display::DisplayHardware {
-            spi: elecrow_board::display::DisplaySPIBus {
-                spi_peripheral: peripherals.SPI2,
-                sck: peripherals.GPIO42,
-                mosi: peripherals.GPIO39,
-                data_command: peripherals.GPIO41,
-                chip_select: peripherals.GPIO40,
-            },
-            pin_tft_power: peripherals.GPIO14,
-            pin_backlight: peripherals.GPIO38,
-        },
-        peripherals.DMA_CH0,
-        dma_rx_buf,
-        dma_tx_buf,
-        delay,
-    );
 
     // ---- Framebuffer + font renderer -------------------------------------------
     let fb = display::Framebuffer::new(480, 320);
@@ -186,6 +222,4 @@ async fn main(spawner: Spawner) -> ! {
     loop {
         Timer::after(Duration::from_secs(60)).await;
     }
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.0.0/examples
 }

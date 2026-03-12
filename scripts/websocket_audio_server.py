@@ -68,12 +68,18 @@ async def serve(host: str, port: int, output: str) -> None:
         frame_count = 0
 
         try:
-            async for message in websocket:
+            while True:
+                try:
+                    message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    print("  No data for 5 seconds, saving and closing.")
+                    break
+
                 if isinstance(message, bytes):
                     pcm_buf.write(message)
                     frame_count += 1
-                    if frame_count % 10 == 0:
-                        print(f"  Received {frame_count} frames ({pcm_buf.tell()} bytes)")
+
+                    print(f"  Received {frame_count} frames ({pcm_buf.tell()} bytes)")
                 elif isinstance(message, str):
                     print(f"  Text frame: {message}")
                     if "CloseStream" in message:

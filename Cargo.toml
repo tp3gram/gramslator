@@ -11,6 +11,8 @@ path = "./src/bin/main.rs"
 
 [dependencies]
 esp-hal = { version = "~1.0", features = ["defmt", "esp32s3", "unstable", "psram"] }
+esp32s3 = "0.34.0"
+libm = "0.2"
 
 esp-rtos = { version = "0.2.0", features = [
   "embassy",
@@ -42,6 +44,7 @@ esp-backtrace = { version = "0.18.1", features = [
 esp-println = { version = "0.16.1", features = ["esp32s3", "defmt-espflash"] }
 # for more networking protocol support see https://crates.io/crates/edge-net
 embassy-executor = { version = "0.9.1", features = ["defmt"] }
+embassy-sync = { version = "0.7", features = ["defmt"] }
 embassy-time = { version = "0.5.0", features = ["defmt"] }
 esp-radio = { version = "0.17.0", features = [
   "esp-alloc",
@@ -65,7 +68,6 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
   "socket-udp",
 ] }
 
-embassy-sync = { version = "0.7", features = ["defmt"] }
 critical-section = "1.2.0"
 static_cell = "2.1.1"
 mipidsi = "0.10.0"

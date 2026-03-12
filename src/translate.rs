@@ -388,7 +388,7 @@ async fn translation_task(
         }
 
         let mut conn =
-            match Connection::init_tls(stack, env!("GOOGLE_TRANSLATE_HOST"), 443, tls).await {
+            match Connection::open_tcp_connection_with_tls(stack, env!("GOOGLE_TRANSLATE_HOST"), 443, tls).await {
                 Ok(c) => c,
                 Err(e) => {
                     info!("Failed to connect to Google Translate: {:?}", e);

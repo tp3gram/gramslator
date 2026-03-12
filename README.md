@@ -30,7 +30,7 @@ SD Card (High-speed SPI)
 - SCK IO5
 - CS IO7
 
-Microphone (I2S in)
+Microphone (LMD3526B261-OFA01, I2S in)
 - Enable Mic: IO45 low (pull-up resistor)
 
 - CLK: IO9
