@@ -531,7 +531,7 @@ impl FontRenderer {
     }
 
     /// Compute the advance width of a character at the given pixel size.
-    fn char_advance(&self, ch: char, px: f32) -> f32 {
+    pub fn char_advance(&self, ch: char, px: f32) -> f32 {
         let scale = self.scale(px);
         self.face
             .glyph_index(ch)
@@ -945,183 +945,282 @@ fn f32_round(x: f32) -> i32 {
 }
 
 // ===========================================================================
-// Bouncing-text screensaver demo
+// Word-wrap helper
 // ===========================================================================
+
+use alloc::string::String;
 
 use defmt::info;
 
-/// Rainbow palette for text colouring.
-const RAINBOW: [Rgb666; 7] = [
-    Rgb666::new(63, 0, 0),  // red
-    Rgb666::new(63, 31, 0), // orange
-    Rgb666::new(63, 63, 0), // yellow
-    Rgb666::new(0, 63, 0),  // green
-    Rgb666::new(0, 31, 63), // blue
-    Rgb666::new(18, 0, 63), // indigo
-    Rgb666::new(40, 0, 63), // violet
-];
+/// Split `text` into lines that fit within `max_width` pixels at font size
+/// `px`.  Word boundaries are preferred; if a single word is wider than the
+/// line, it is broken mid-word.
+///
+/// Returns a `Vec<String>` of lines (without trailing newlines).
+fn word_wrap(renderer: &FontRenderer, text: &str, px: f32, max_width: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width: f32 = 0.0;
+    let space_advance = renderer.text_width(" ", px);
 
-/// Simple xorshift32 PRNG — no crate dependency, good enough for a screensaver.
-#[allow(dead_code)]
-struct Xorshift32(u32);
+    for word in text.split_whitespace() {
+        let word_width = renderer.text_width(word, px);
 
-#[allow(dead_code)]
-impl Xorshift32 {
-    fn next(&mut self) -> u32 {
-        let mut s = self.0;
-        s ^= s << 13;
-        s ^= s >> 17;
-        s ^= s << 5;
-        self.0 = s;
-        s
+        if current_line.is_empty() {
+            // First word on the line — always accept it.
+            if word_width <= max_width {
+                current_line.push_str(word);
+                current_width = word_width;
+            } else {
+                // Word itself is wider than the line — break it character
+                // by character using char_advance (no allocation needed).
+                for ch in word.chars() {
+                    let cw = renderer.char_advance(ch, px);
+                    if current_width + cw > max_width && !current_line.is_empty() {
+                        lines.push(core::mem::replace(&mut current_line, String::new()));
+                        current_width = 0.0;
+                    }
+                    current_line.push(ch);
+                    current_width += cw;
+                }
+            }
+        } else if current_width + space_advance + word_width <= max_width {
+            // Word fits on the current line.
+            current_line.push(' ');
+            current_line.push_str(word);
+            current_width += space_advance + word_width;
+        } else {
+            // Word doesn't fit — start a new line.
+            lines.push(core::mem::replace(&mut current_line, String::from(word)));
+            current_width = word_width;
+        }
     }
 
-    /// Return a random index in `0..len`.
-    fn usize_mod(&mut self, len: usize) -> usize {
-        (self.next() as usize) % len
+    if !current_line.is_empty() {
+        lines.push(current_line);
     }
+
+    // If the input was empty, return one empty line so the caller can
+    // still compute layout bounds.
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
 }
 
-/// Embassy task: bounces "Hello world!" around the screen like an old
-/// screensaver, logging FPS every second.
+// ===========================================================================
+// Display task — live transcript + translation renderer
+// ===========================================================================
+
+/// Screen dimensions.
+const SCREEN_W: i32 = 480;
+const SCREEN_H: i32 = 320;
+
+/// Horizontal padding from the screen edges.
+const H_PAD: i32 = 8;
+
+/// Y coordinate where the transcript region starts (top of screen).
+const TRANSCRIPT_Y: i32 = 4;
+/// Font size (px) for the transcript.
+const TRANSCRIPT_PX: f32 = 20.0;
+/// Foreground colour for the transcript text.
+const TRANSCRIPT_COLOR: Rgb666 = Rgb666::new(48, 48, 48); // light grey
+
+/// Y coordinate of the separator line between regions.
+const SEPARATOR_Y: i32 = 107;
+
+/// Y coordinate where the translation region starts.
+const TRANSLATION_Y: i32 = SEPARATOR_Y + 5;
+/// Font size (px) for the translation.
+const TRANSLATION_PX: f32 = 36.0;
+/// Foreground colour for the translation text.
+const TRANSLATION_COLOR: Rgb666 = Rgb666::new(40, 63, 40); // light green
+
+/// Background colour for the entire screen.
+const BG: Rgb666 = Rgb666::BLACK;
+
+/// Embassy task: renders the current transcript (small, top) and translation
+/// (large, bottom 2/3) whenever the display signal fires.
+///
+/// The task waits on the `display_signal`, reads the shared
+/// [`AppState`](gramslator::app_state), word-wraps the text, and flushes
+/// only the dirty regions to the hardware display via async DMA.
 #[embassy_executor::task]
-pub async fn bouncing_text(
+pub async fn display_task(
     mut hw_display: gramslator::elecrow_board::display::AsyncDisplay<'static>,
     mut fb: Framebuffer,
     mut renderer: FontRenderer,
+    display_signal: &'static gramslator::app_state::DisplaySignal,
 ) {
-    const TEXT: &str = "Hello world!";
-    const PX: f32 = 40.0;
-    const SCREEN_W: i32 = 480;
-    const SCREEN_H: i32 = 320;
+    // Maximum usable width for text.
+    let max_text_width = (SCREEN_W - 2 * H_PAD) as f32;
 
-    let bg = Rgb666::BLACK;
-
-    // // --- Random character mode (commented out) ---
-    // const NUM_CHARS: usize = 10;
-    // let charset = renderer.available_chars();
-    // info!("Font charset: {} printable codepoints", charset.len());
-    // let text_h = renderer.line_height(PX) as i32 + 2;
-    // let text_w = (PX as i32) * (NUM_CHARS as i32);
-    // let seed = esp_hal::time::Instant::now().duration_since_epoch().as_millis() as u32;
-    // let mut rng = Xorshift32(seed | 1);
-
-    // --- Fixed text mode ---
-    let text_w = renderer.text_width(TEXT, PX) as i32 + 2;
-    let text_h = renderer.line_height(PX) as i32 + 2;
-
-    // Starting position & velocity (pixels per frame).
-    let mut x: i32 = 20;
-    let mut y: i32 = 40;
-    let mut dx: i32 = 3;
-    let mut dy: i32 = 2;
-
-    // Track previous frame's actual rendered width for clean erasure.
-    let mut prev_w: i32 = text_w;
-
-    // Initial full-screen clear.
-    fb.clear(bg).unwrap();
+    // Initial full-screen clear + separator line.
+    fb.clear(BG).unwrap();
+    draw_separator(&mut fb);
     fb.flush_async(&mut hw_display).await.unwrap();
+    info!("Display task started — waiting for state updates");
 
-    info!(
-        "Bouncing text started ({}×{} px bounding box)",
-        text_w, text_h
-    );
-
-    // FPS measurement state.
-    let mut frame_count: u32 = 0;
-    let mut fps_epoch = esp_hal::time::Instant::now();
+    // Remember what was last rendered so we can skip redundant redraws.
+    let mut last_transcript = String::new();
+    let mut last_translation = String::new();
 
     loop {
-        let frame_start = esp_hal::time::Instant::now();
+        // Block until something changes.
+        display_signal.wait().await;
 
-        // 1. Erase text at OLD position using the previous frame's width.
-        let erase_w = prev_w.max(text_w) as u32;
-        let old_rect =
-            Rectangle::new(Point::new(x, y), Size::new(erase_w, text_h as u32));
-        fb.fill_solid(&old_rect, bg).unwrap();
+        // Read the latest state.
+        let (transcript, translation) = gramslator::app_state::read_state();
 
-        // 2. Update position.
-        x += dx;
-        y += dy;
+        let transcript_changed = transcript != last_transcript;
+        let translation_changed = translation != last_translation;
 
-        // 3. Bounce off edges.
-        if x <= 0 {
-            x = 0;
-            dx = dx.abs();
-        } else if x + text_w >= SCREEN_W {
-            x = SCREEN_W - text_w;
-            dx = -(dx.abs());
+        if !transcript_changed && !translation_changed {
+            continue;
         }
 
-        if y <= 0 {
-            y = 0;
-            dy = dy.abs();
-        } else if y + text_h >= SCREEN_H {
-            y = SCREEN_H - text_h;
-            dy = -(dy.abs());
-        }
+        // ---- Transcript region (top 1/3) --------------------------------
+        if transcript_changed {
+            // Clear the transcript region.
+            let transcript_region = Rectangle::new(
+                Point::new(0, 0),
+                Size::new(SCREEN_W as u32, SEPARATOR_Y as u32),
+            );
+            fb.fill_solid(&transcript_region, BG).unwrap();
+            draw_separator(&mut fb);
 
-        // 4. Draw text at the NEW position.
-        {
-            let mut pen = Point::new(x, y);
-
-            // --- Fixed text: rainbow "Hello world!" ---
-            for (i, ch) in TEXT.chars().enumerate() {
-                let mut buf = [0u8; 4];
-                let s = ch.encode_utf8(&mut buf);
-                pen = renderer
-                    .draw_text(
-                        &mut fb,
-                        s,
-                        pen,
-                        PX,
-                        RAINBOW[i % RAINBOW.len()],
-                        bg,
-                    )
+            // Word-wrap and render.
+            let lines = word_wrap(&renderer, &transcript, TRANSCRIPT_PX, max_text_width);
+            let line_h = renderer.line_height(TRANSCRIPT_PX) as i32 + 2;
+            let mut y = TRANSCRIPT_Y;
+            for line in &lines {
+                if y + line_h > SEPARATOR_Y {
+                    break; // don't overflow into the translation region
+                }
+                renderer
+                    .draw_text(&mut fb, line, Point::new(H_PAD, y), TRANSCRIPT_PX, TRANSCRIPT_COLOR, BG)
                     .unwrap();
+                y += line_h;
             }
 
-            // // --- Random character mode (commented out) ---
-            // for i in 0..NUM_CHARS {
-            //     let ch = charset[rng.usize_mod(charset.len())];
-            //     let mut buf = [0u8; 4];
-            //     let s = ch.encode_utf8(&mut buf);
-            //     pen = renderer
-            //         .draw_text(
-            //             &mut fb,
-            //             s,
-            //             pen,
-            //             PX,
-            //             RAINBOW[i % RAINBOW.len()],
-            //             bg,
-            //         )
-            //         .unwrap();
-            // }
-
-            // Remember actual rendered width for next frame's erase.
-            prev_w = (pen.x - x) + 4;
+            last_transcript.clear();
+            last_transcript.push_str(&transcript);
         }
 
-        // 5. Flush only the dirty region (union of erase + draw rects).
-        fb.flush_async(&mut hw_display).await.unwrap();
-
-        // 6. FPS logging — report every second.
-        frame_count += 1;
-        let now = esp_hal::time::Instant::now();
-        let elapsed_ms = (now - fps_epoch).as_millis();
-        if elapsed_ms >= 1000 {
-            let fps = (frame_count as u64 * 1000) / elapsed_ms;
-            let frame_ms = (now - frame_start).as_millis();
-            info!(
-                "FPS: {} ({} frames / {} ms) — last frame {} ms",
-                fps, frame_count, elapsed_ms, frame_ms
+        // ---- Translation region (bottom 2/3) ----------------------------
+        if translation_changed {
+            // Clear the translation region.
+            let translation_region = Rectangle::new(
+                Point::new(0, TRANSLATION_Y),
+                Size::new(SCREEN_W as u32, (SCREEN_H - TRANSLATION_Y) as u32),
             );
-            frame_count = 0;
-            fps_epoch = now;
+            fb.fill_solid(&translation_region, BG).unwrap();
+
+            // Word-wrap and render.
+            let lines = word_wrap(&renderer, &translation, TRANSLATION_PX, max_text_width);
+            let line_h = renderer.line_height(TRANSLATION_PX) as i32 + 2;
+            let mut y = TRANSLATION_Y;
+            for line in &lines {
+                if y + line_h > SCREEN_H {
+                    break; // don't overflow off screen
+                }
+                renderer
+                    .draw_text(&mut fb, line, Point::new(H_PAD, y), TRANSLATION_PX, TRANSLATION_COLOR, BG)
+                    .unwrap();
+                y += line_h;
+            }
+
+            last_translation.clear();
+            last_translation.push_str(&translation);
         }
 
-        // No artificial delay — flush_async already yields to the executor
-        // during the DMA transfer, giving other tasks a chance to run.
+        // ---- Flush dirty regions ----------------------------------------
+        if let Err(e) = fb.flush_async(&mut hw_display).await {
+            info!("Display flush error: {:?}", e);
+        }
     }
 }
+
+/// Draw a thin horizontal separator line at [`SEPARATOR_Y`].
+fn draw_separator(fb: &mut Framebuffer) {
+    let separator_color = Rgb666::new(20, 20, 20); // dark grey
+    let sep_rect = Rectangle::new(
+        Point::new(H_PAD, SEPARATOR_Y),
+        Size::new((SCREEN_W - 2 * H_PAD) as u32, 1),
+    );
+    fb.fill_solid(&sep_rect, separator_color).unwrap();
+}
+
+// ===========================================================================
+// Bouncing-text screensaver demo (retained for reference / debugging)
+// ===========================================================================
+
+// /// Rainbow palette for text colouring.
+// const RAINBOW: [Rgb666; 7] = [
+//     Rgb666::new(63, 0, 0),  // red
+//     Rgb666::new(63, 31, 0), // orange
+//     Rgb666::new(63, 63, 0), // yellow
+//     Rgb666::new(0, 63, 0),  // green
+//     Rgb666::new(0, 31, 63), // blue
+//     Rgb666::new(18, 0, 63), // indigo
+//     Rgb666::new(40, 0, 63), // violet
+// ];
+//
+// /// Simple xorshift32 PRNG.
+// struct Xorshift32(u32);
+// impl Xorshift32 {
+//     fn next(&mut self) -> u32 {
+//         let mut s = self.0;
+//         s ^= s << 13;
+//         s ^= s >> 17;
+//         s ^= s << 5;
+//         self.0 = s;
+//         s
+//     }
+//     fn usize_mod(&mut self, len: usize) -> usize {
+//         (self.next() as usize) % len
+//     }
+// }
+//
+// /// Embassy task: bounces "Hello world!" around the screen.
+// #[embassy_executor::task]
+// pub async fn bouncing_text(
+//     mut hw_display: gramslator::elecrow_board::display::AsyncDisplay<'static>,
+//     mut fb: Framebuffer,
+//     mut renderer: FontRenderer,
+// ) {
+//     const TEXT: &str = "Hello world!";
+//     const PX: f32 = 40.0;
+//     const SCREEN_W: i32 = 480;
+//     const SCREEN_H: i32 = 320;
+//     let bg = Rgb666::BLACK;
+//     let text_w = renderer.text_width(TEXT, PX) as i32 + 2;
+//     let text_h = renderer.line_height(PX) as i32 + 2;
+//     let mut x: i32 = 20; let mut y: i32 = 40;
+//     let mut dx: i32 = 3; let mut dy: i32 = 2;
+//     let mut prev_w: i32 = text_w;
+//     fb.clear(bg).unwrap();
+//     fb.flush_async(&mut hw_display).await.unwrap();
+//     loop {
+//         let erase_w = prev_w.max(text_w) as u32;
+//         let old_rect = Rectangle::new(Point::new(x, y), Size::new(erase_w, text_h as u32));
+//         fb.fill_solid(&old_rect, bg).unwrap();
+//         x += dx; y += dy;
+//         if x <= 0 { x = 0; dx = dx.abs(); }
+//         else if x + text_w >= SCREEN_W { x = SCREEN_W - text_w; dx = -(dx.abs()); }
+//         if y <= 0 { y = 0; dy = dy.abs(); }
+//         else if y + text_h >= SCREEN_H { y = SCREEN_H - text_h; dy = -(dy.abs()); }
+//         let mut pen = Point::new(x, y);
+//         for (i, ch) in TEXT.chars().enumerate() {
+//             let mut buf = [0u8; 4];
+//             let s = ch.encode_utf8(&mut buf);
+//             pen = renderer.draw_text(&mut fb, s, pen, PX,
+//                 [Rgb666::new(63,0,0), Rgb666::new(63,31,0), Rgb666::new(63,63,0),
+//                  Rgb666::new(0,63,0), Rgb666::new(0,31,63), Rgb666::new(18,0,63),
+//                  Rgb666::new(40,0,63)][i % 7], bg).unwrap();
+//         }
+//         prev_w = (pen.x - x) + 4;
+//         fb.flush_async(&mut hw_display).await.unwrap();
+//     }
+// }

@@ -88,22 +88,13 @@ async fn main(spawner: Spawner) -> ! {
     // ---- TLS initialization ---------------------------------------------------
 
     // True Random Number Generator + mbedTLS singleton.
-    // Stored in a StaticCell so the spawned translation task can hold a
+    // Stored in a StaticCell so the spawned tasks can hold a
     // `&'static Tls<'static>` reference.
     static TLS: StaticCell<mbedtls_rs::Tls<'static>> = StaticCell::new();
     let tls: &'static mbedtls_rs::Tls<'static> = TLS.init(net::init_tls(net::TlsHardware {
         rng: peripherals.RNG,
         adc1: peripherals.ADC1,
     }));
-
-    // ---- Translation task -------------------------------------------------------
-
-    static TRANSLATE_SIGNAL: StaticCell<gramslator::translate::TranslateSignal> = StaticCell::new();
-    let signal = TRANSLATE_SIGNAL.init(gramslator::translate::TranslateSignal::new());
-    let translate_signal =
-        gramslator::translate::spawn_translation_task(signal, &spawner, network, tls);
-
-    elecrow_board::network::test_stream(network, tls, translate_signal).await;
 
     // ---- Display (SPI + async DMA) ---------------------------------------------
     let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
@@ -147,11 +138,49 @@ async fn main(spawner: Spawner) -> ! {
         esp_alloc::HEAP.free()
     );
 
-    // ---- Spawn the bouncing-text screensaver -----------------------------------
+    // ---- Shared signals --------------------------------------------------------
+
+    // Display signal — any task signals this to wake the display renderer.
+    static DISPLAY_SIGNAL: StaticCell<gramslator::app_state::DisplaySignal> = StaticCell::new();
+    let display_signal: &'static gramslator::app_state::DisplaySignal =
+        DISPLAY_SIGNAL.init(gramslator::app_state::DisplaySignal::new());
+
+    // Translate signal — the Deepgram task signals this to request a translation.
+    static TRANSLATE_SIGNAL: StaticCell<gramslator::translate::TranslateSignal> = StaticCell::new();
+    let translate_signal = TRANSLATE_SIGNAL.init(gramslator::translate::TranslateSignal::new());
+
+    // ---- Spawn tasks -----------------------------------------------------------
+
+    // Translation task (existing, now receives display_signal too).
+    let translate_signal = gramslator::translate::spawn_translation_task(
+        translate_signal,
+        &spawner,
+        network,
+        tls,
+        display_signal,
+    );
+
+    // Deepgram streaming task (persistent, reconnects on failure).
     spawner
-        .spawn(display::bouncing_text(hw_display, fb, renderer))
-        .unwrap();
-    info!("Bouncing text task spawned");
+        .spawn(elecrow_board::network::deepgram_task(
+            network,
+            tls,
+            translate_signal,
+            display_signal,
+        ))
+        .expect("Failed to spawn Deepgram task");
+    info!("Deepgram streaming task spawned");
+
+    // Display task (renders transcript + translation on signal).
+    spawner
+        .spawn(display::display_task(
+            hw_display,
+            fb,
+            renderer,
+            display_signal,
+        ))
+        .expect("Failed to spawn display task");
+    info!("Display task spawned");
 
     // Main task has nothing else to do — just idle.
     loop {

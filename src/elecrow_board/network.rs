@@ -1,5 +1,6 @@
 use alloc::string::String;
 
+use crate::app_state::{self, DisplaySignal};
 use crate::net::{self, Connection};
 use crate::translate;
 use defmt::info;
@@ -18,6 +19,10 @@ const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DHCP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_WIFI_RETRIES: usize = 5;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Delay before reconnecting to Deepgram after a connection error or stream
+/// completion.
+const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
 pub struct NetworkHardware {
     pub wifi: WIFI<'static>,
@@ -156,6 +161,10 @@ pub fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::Stack<
     stack
 }
 
+// ---------------------------------------------------------------------------
+// WebSocket frame handler
+// ---------------------------------------------------------------------------
+
 /// Process a single incoming WebSocket frame.
 ///
 /// Returns `true` when the connection should be considered closed (server sent
@@ -165,13 +174,26 @@ async fn handle_ws_frame(
     payload: &[u8],
     conn: &mut Connection<'_>,
     mask_key: u32,
-    signal: &translate::TranslateSignal,
+    translate_signal: &translate::TranslateSignal,
+    display_signal: &DisplaySignal,
 ) -> bool {
     match frame_type {
         edge_ws::FrameType::Text(_) => {
             let json = core::str::from_utf8(payload).unwrap_or("<invalid UTF-8>");
             info!("Received: {}", json);
-            signal.signal(translate::TranscriptMessage::DgJson(String::from(json)));
+
+            // Extract the transcript and update shared state.
+            if let Some(transcript) = translate::extract_transcript(json) {
+                let changed = app_state::update_transcript(transcript);
+                // Always wake the display so it shows the latest partial.
+                display_signal.signal(());
+
+                if changed {
+                    // Forward to translation task only on unique transcripts.
+                    translate_signal
+                        .signal(translate::TranscriptMessage::DgJson(String::from(json)));
+                }
+            }
             false
         }
         edge_ws::FrameType::Binary(_) => {
@@ -201,22 +223,33 @@ async fn handle_ws_frame(
     }
 }
 
-pub async fn test_stream(
+// ---------------------------------------------------------------------------
+// Persistent Deepgram streaming task
+// ---------------------------------------------------------------------------
+
+/// Raw WAV file baked into flash.  The PCM data starts at byte 44
+/// (standard WAV header).
+const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
+const WAV_HEADER_SIZE: usize = 44;
+
+/// Persistent Embassy task that maintains a WebSocket connection to Deepgram,
+/// streams example audio, and publishes received transcripts to the shared
+/// [`AppState`](crate::app_state) and the translation signal.
+///
+/// On connection failure or stream completion the task waits briefly and
+/// reconnects, running indefinitely.
+#[embassy_executor::task]
+pub async fn deepgram_task(
     network: embassy_net::Stack<'static>,
     tls: &'static Tls<'static>,
-    signal: &'static translate::TranslateSignal,
+    translate_signal: &'static translate::TranslateSignal,
+    display_signal: &'static DisplaySignal,
 ) {
-    /// Raw WAV file baked into flash. The PCM data starts at byte 44 (standard WAV header).
-    const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
-    const WAV_HEADER_SIZE: usize = 44;
-
     // Wait for WiFi + DHCP before attempting any network I/O.
     network.wait_config_up().await;
+    info!("Deepgram task: network is up, starting streaming loop");
 
-    // ---- Deepgram connection ----------------------------------------------------
-    //
-    // DEEPGRAM_USE_TLS: "false" disables TLS (HTTP), defaults to "true" (HTTPS).
-    // DEEPGRAM_PORT:    override the port, defaults to 443.
+    // ---- Deepgram connection config ------------------------------------
     const DEEPGRAM_USE_TLS: bool = konst::result::unwrap_ctx!(konst::primitive::parse_bool(
         match option_env!("DEEPGRAM_USE_TLS") {
             Some(v) => v,
@@ -231,76 +264,142 @@ pub async fn test_stream(
         }
     ));
 
-    let mut conn = if DEEPGRAM_USE_TLS {
+    loop {
+        // ---- Connect to Deepgram ----------------------------------------
+        let mut conn = if DEEPGRAM_USE_TLS {
+            info!(
+                "Connecting to Deepgram over HTTPS (port {})...",
+                DEEPGRAM_PORT
+            );
+            match Connection::init_tls(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT, tls).await {
+                Ok(c) => c,
+                Err(e) => {
+                    info!("Deepgram TLS connect failed: {:?}, retrying...", e);
+                    Timer::after(RECONNECT_DELAY).await;
+                    continue;
+                }
+            }
+        } else {
+            info!(
+                "Connecting to Deepgram over HTTP (port {})...",
+                DEEPGRAM_PORT
+            );
+            match Connection::init_tcp(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT).await {
+                Ok(c) => c,
+                Err(e) => {
+                    info!("Deepgram TCP connect failed: {:?}, retrying...", e);
+                    Timer::after(RECONNECT_DELAY).await;
+                    continue;
+                }
+            }
+        };
+
+        // ---- WebSocket upgrade ------------------------------------------
+        net::websocket_upgrade(&mut conn).await;
+
+        // ---- Stream audio & read responses (interleaved) ----------------
+        //
+        // We cannot split the TLS connection into independent read/write
+        // halves, so instead we interleave: after sending each audio chunk
+        // we attempt a brief non-blocking recv to drain any partial
+        // transcripts Deepgram has ready.
+        let audio_data = &AUDIO_WAV[WAV_HEADER_SIZE..];
+        let chunk_size = 2048;
+        let mask_key: u32 = 0xDEAD_BEEF; // Fixed mask key for PoC
+
         info!(
-            "Connecting to Deepgram over HTTPS (port {})...",
-            DEEPGRAM_PORT
+            "Sending {} bytes of audio ({} chunks)...",
+            audio_data.len(),
+            audio_data.len().div_ceil(chunk_size)
         );
-        Connection::init_tls(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT, tls)
+
+        let mut recv_buf = [0u8; 4096];
+        let mut done = false;
+        /// How long to poll for a response between audio chunks.
+        const RECV_POLL: Duration = Duration::from_millis(5);
+
+        for (i, chunk) in audio_data.chunks(chunk_size).enumerate() {
+            if done {
+                break;
+            }
+
+            if let Err(e) = edge_ws::io::send(
+                &mut conn,
+                edge_ws::FrameType::Binary(false),
+                Some(mask_key),
+                chunk,
+            )
             .await
-            .expect("Failed to establish TLS connection")
-    } else {
-        info!(
-            "Connecting to Deepgram over HTTP (port {})...",
-            DEEPGRAM_PORT
-        );
-        Connection::init_tcp(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT)
-            .await
-            .expect("Failed to establish TCP connection")
-    };
-
-    // ---- WebSocket upgrade ----------------------------------------------------
-
-    net::websocket_upgrade(&mut conn).await;
-
-    // ---- Stream audio & read responses (interleaved) -------------------------
-    //
-    // We cannot split the TLS connection into independent read/write halves, so
-    // instead we interleave: after sending each audio chunk we attempt a brief
-    // non-blocking recv to drain any partial transcripts Deepgram has ready.
-    // This lets us forward results to the translation task while still streaming
-    // audio rather than waiting until all audio is sent.
-
-    let audio_data = &AUDIO_WAV[WAV_HEADER_SIZE..];
-    let chunk_size = 2048;
-    let mask_key: u32 = 0xDEAD_BEEF; // Fixed mask key for PoC
-
-    info!(
-        "Sending {} bytes of audio ({} chunks)...",
-        audio_data.len(),
-        audio_data.len().div_ceil(chunk_size)
-    );
-
-    let mut recv_buf = [0u8; 4096];
-    let mut done = false;
-    /// How long to poll for a response between audio chunks.
-    const RECV_POLL: Duration = Duration::from_millis(5);
-
-    for (i, chunk) in audio_data.chunks(chunk_size).enumerate() {
-        edge_ws::io::send(
-            &mut conn,
-            edge_ws::FrameType::Binary(false),
-            Some(mask_key),
-            chunk,
-        )
-        .await
-        .expect("Failed to send audio chunk");
-        conn.flush().await.expect("Failed to flush audio chunk");
-
-        if i % 10 == 0 {
-            info!("  Sent chunk {}", i);
-        }
-
-        // Drain any responses that arrived while we were sending.
-        while !done {
-            match embassy_time::with_timeout(RECV_POLL, edge_ws::io::recv(&mut conn, &mut recv_buf))
-                .await
             {
-                Err(_timeout) => break, // nothing ready right now — send next chunk
+                info!("Failed to send audio chunk: {:?}", e);
+                done = true;
+                break;
+            }
+            if let Err(e) = conn.flush().await {
+                info!("Failed to flush audio chunk: {:?}", e);
+                done = true;
+                break;
+            }
+
+            if i % 10 == 0 {
+                info!("  Sent chunk {}", i);
+            }
+
+            // Drain any responses that arrived while we were sending.
+            while !done {
+                match embassy_time::with_timeout(
+                    RECV_POLL,
+                    edge_ws::io::recv(&mut conn, &mut recv_buf),
+                )
+                .await
+                {
+                    Err(_timeout) => break, // nothing ready — send next chunk
+                    Ok(Ok((frame_type, len))) => {
+                        done = handle_ws_frame(
+                            frame_type,
+                            &recv_buf[..len],
+                            &mut conn,
+                            mask_key,
+                            translate_signal,
+                            display_signal,
+                        )
+                        .await;
+                    }
+                    Ok(Err(e)) => {
+                        info!("WebSocket recv error: {:?}", e);
+                        done = true;
+                    }
+                }
+            }
+        }
+        info!("Audio sent! Reading remaining responses for 5 seconds...");
+
+        // ---- Read remaining responses for up to 5 seconds ---------------
+        let deadline = embassy_time::Instant::now() + Duration::from_secs(5);
+
+        while !done && embassy_time::Instant::now() < deadline {
+            let remaining = deadline - embassy_time::Instant::now();
+
+            match embassy_time::with_timeout(
+                remaining,
+                edge_ws::io::recv(&mut conn, &mut recv_buf),
+            )
+            .await
+            {
+                Err(_timeout) => {
+                    info!("5-second window elapsed.");
+                    break;
+                }
                 Ok(Ok((frame_type, len))) => {
-                    done =
-                        handle_ws_frame(frame_type, &recv_buf[..len], &mut conn, mask_key, signal)
-                            .await;
+                    done = handle_ws_frame(
+                        frame_type,
+                        &recv_buf[..len],
+                        &mut conn,
+                        mask_key,
+                        translate_signal,
+                        display_signal,
+                    )
+                    .await;
                 }
                 Ok(Err(e)) => {
                     info!("WebSocket recv error: {:?}", e);
@@ -308,55 +407,29 @@ pub async fn test_stream(
                 }
             }
         }
-    }
-    info!("Audio sent! Keeping connection open for 5 seconds...");
 
-    // ---- Read remaining responses for up to 5 seconds -------------------------
-    //
-    // Every text frame is forwarded to the translation task immediately via
-    // a Signal.  The translation task handles idle-timeout debouncing so
-    // that rapid partial transcripts don't flood Google Translate.
+        // Tell the translation task to flush immediately.
+        translate_signal.signal(translate::TranscriptMessage::Flush);
 
-    let deadline = embassy_time::Instant::now() + Duration::from_secs(5);
-
-    while !done && embassy_time::Instant::now() < deadline {
-        let remaining = deadline - embassy_time::Instant::now();
-
-        match embassy_time::with_timeout(remaining, edge_ws::io::recv(&mut conn, &mut recv_buf))
-            .await
-        {
-            Err(_timeout) => {
-                info!("5-second window elapsed.");
-                break;
-            }
-            Ok(Ok((frame_type, len))) => {
-                done = handle_ws_frame(frame_type, &recv_buf[..len], &mut conn, mask_key, signal)
-                    .await;
-            }
-            Ok(Err(e)) => {
-                info!("WebSocket recv error: {:?}", e);
-                done = true;
-            }
+        // Signal end of audio stream.
+        if !done {
+            let close_stream = b"{\"type\":\"CloseStream\"}";
+            let _ = edge_ws::io::send(
+                &mut conn,
+                edge_ws::FrameType::Text(false),
+                Some(mask_key),
+                close_stream,
+            )
+            .await;
+            let _ = conn.flush().await;
+            info!("Sent CloseStream");
         }
+
+        conn.close().await;
+        info!(
+            "Deepgram stream complete. Reconnecting in {} s...",
+            RECONNECT_DELAY.as_secs()
+        );
+        Timer::after(RECONNECT_DELAY).await;
     }
-
-    // Tell the translation task to flush immediately — no more frames coming.
-    signal.signal(translate::TranscriptMessage::Flush);
-
-    // Signal end of audio stream
-    if !done {
-        let close_stream = b"{\"type\":\"CloseStream\"}";
-        edge_ws::io::send(
-            &mut conn,
-            edge_ws::FrameType::Text(false),
-            Some(mask_key),
-            close_stream,
-        )
-        .await
-        .expect("Failed to send CloseStream");
-        conn.flush().await.expect("Failed to flush CloseStream");
-        info!("Sent CloseStream");
-    }
-
-    info!("Done! Deepgram streaming complete.");
 }
