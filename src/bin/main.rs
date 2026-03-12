@@ -69,8 +69,7 @@ async fn main(spawner: Spawner) -> ! {
             wifi: peripherals.WIFI,
         },
         &spawner,
-    )
-    .await;
+    );
 
     // ---- TLS initialization ---------------------------------------------------
 

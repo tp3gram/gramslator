@@ -23,7 +23,43 @@ async fn net_task(mut runner: embassy_net::Runner<'static, WifiDevice<'static>>)
     runner.run().await
 }
 
-pub async fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::Stack<'static> {
+/// Drives WiFi start, association, and DHCP to completion in the background.
+#[embassy_executor::task]
+async fn wifi_connect_task(
+    wifi_controller: &'static mut WifiController<'static>,
+    stack: embassy_net::Stack<'static>,
+) {
+    info!("Starting WiFi...");
+    wifi_controller
+        .start_async()
+        .await
+        .expect("Failed to start WiFi");
+    info!("WiFi started!");
+
+    info!("Connecting to '{}'...", env!("WIFI_SSID"));
+    wifi_controller
+        .connect_async()
+        .await
+        .expect("Failed to connect to WiFi");
+    info!("WiFi connected!");
+
+    info!("Waiting for DHCP...");
+    stack.wait_config_up().await;
+    info!("DHCP configured!");
+
+    if let Some(config) = stack.config_v4() {
+        info!("Got IP: {}", config.address);
+    }
+}
+
+/// Initializes Wi-Fi hardware and returns the network stack immediately.
+///
+/// The actual connection (start, associate, DHCP) happens in a background
+/// Embassy task. Operations on the returned `Stack` will block until the
+/// network is ready, so callers don't need to poll for readiness — they
+/// can proceed with other initialization and the first network call will
+/// naturally wait.
+pub fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::Stack<'static> {
     static RADIO_CONTROLLER: StaticCell<esp_radio::Controller<'static>> = StaticCell::new();
     let radio_init = RADIO_CONTROLLER
         .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
@@ -55,27 +91,9 @@ pub async fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::
         .spawn(net_task(runner))
         .expect("Failed to spawn net task");
 
-    info!("Starting WiFi...");
-    wifi_controller
-        .start_async()
-        .await
-        .expect("Failed to start WiFi");
-    info!("WiFi started!");
-
-    info!("Connecting to '{}'...", env!("WIFI_SSID"));
-    wifi_controller
-        .connect_async()
-        .await
-        .expect("Failed to connect to WiFi");
-    info!("WiFi connected!");
-
-    info!("Waiting for DHCP...");
-    stack.wait_config_up().await;
-    info!("DHCP configured!");
-
-    if let Some(config) = stack.config_v4() {
-        info!("Got IP: {}", config.address);
-    }
+    spawner
+        .spawn(wifi_connect_task(wifi_controller, stack))
+        .expect("Failed to spawn WiFi connect task");
 
     stack
 }
@@ -85,11 +103,13 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
     const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
     const WAV_HEADER_SIZE: usize = 44;
 
+    // Wait for WiFi + DHCP before attempting any network I/O.
+    network.wait_config_up().await;
+
     // ---- Deepgram connection ----------------------------------------------------
     //
     // DEEPGRAM_USE_TLS: "false" disables TLS (HTTP), defaults to "true" (HTTPS).
     // DEEPGRAM_PORT:    override the port, defaults to 443.
-
     const DEEPGRAM_USE_TLS: bool = konst::result::unwrap_ctx!(konst::primitive::parse_bool(
         match option_env!("DEEPGRAM_USE_TLS") {
             Some(v) => v,
