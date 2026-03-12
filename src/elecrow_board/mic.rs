@@ -181,11 +181,24 @@ where
         let n = MIC_PIPE.read(&mut buf[..]).await;
         info!("send_audio_from_mic_pipe: read {} bytes", n);
 
+        // Drop duplicate channel: Data16Channel16 outputs each mono PDM
+        // sample twice (L and R slots identical). Keep every other 16-bit
+        // sample to produce true mono: [S0,S0,S1,S1,...] → [S0,S1,...]
+        let mono_len = n / 2;
+        let mut j = 0;
+        for i in (0..n).step_by(4) {
+            if i + 1 < n {
+                buf[j] = buf[i];
+                buf[j + 1] = buf[i + 1];
+                j += 2;
+            }
+        }
+
         edge_ws::io::send(
             &mut *conn,
             edge_ws::FrameType::Binary(false),
             Some(0),
-            &buf[..n],
+            &buf[..mono_len],
         )
         .await
         .expect("Failed to send audio chunk");
