@@ -156,6 +156,51 @@ pub fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::Stack<
     stack
 }
 
+/// Process a single incoming WebSocket frame.
+///
+/// Returns `true` when the connection should be considered closed (server sent
+/// a Close frame or an unrecoverable condition was encountered).
+async fn handle_ws_frame(
+    frame_type: edge_ws::FrameType,
+    payload: &[u8],
+    conn: &mut Connection<'_>,
+    mask_key: u32,
+    signal: &translate::TranslateSignal,
+) -> bool {
+    match frame_type {
+        edge_ws::FrameType::Text(_) => {
+            let json = core::str::from_utf8(payload).unwrap_or("<invalid UTF-8>");
+            info!("Received: {}", json);
+            signal.signal(translate::TranscriptMessage::DgJson(String::from(json)));
+            false
+        }
+        edge_ws::FrameType::Binary(_) => {
+            info!("Received binary frame ({} bytes)", payload.len());
+            false
+        }
+        edge_ws::FrameType::Close => {
+            info!("WebSocket closed by server.");
+            true
+        }
+        edge_ws::FrameType::Ping => {
+            info!("Ping received, sending pong");
+            let _ = edge_ws::io::send(
+                &mut *conn,
+                edge_ws::FrameType::Pong,
+                Some(mask_key),
+                payload,
+            )
+            .await;
+            let _ = conn.flush().await;
+            false
+        }
+        other => {
+            info!("Received {:?} frame ({} bytes)", other, payload.len());
+            false
+        }
+    }
+}
+
 pub async fn test_stream(
     network: embassy_net::Stack<'static>,
     tls: &'static Tls<'static>,
@@ -208,7 +253,13 @@ pub async fn test_stream(
 
     net::websocket_upgrade(&mut conn).await;
 
-    // ---- Stream audio ---------------------------------------------------------
+    // ---- Stream audio & read responses (interleaved) -------------------------
+    //
+    // We cannot split the TLS connection into independent read/write halves, so
+    // instead we interleave: after sending each audio chunk we attempt a brief
+    // non-blocking recv to drain any partial transcripts Deepgram has ready.
+    // This lets us forward results to the translation task while still streaming
+    // audio rather than waiting until all audio is sent.
 
     let audio_data = &AUDIO_WAV[WAV_HEADER_SIZE..];
     let chunk_size = 2048;
@@ -219,6 +270,11 @@ pub async fn test_stream(
         audio_data.len(),
         audio_data.len().div_ceil(chunk_size)
     );
+
+    let mut recv_buf = [0u8; 4096];
+    let mut done = false;
+    /// How long to poll for a response between audio chunks.
+    const RECV_POLL: Duration = Duration::from_millis(5);
 
     for (i, chunk) in audio_data.chunks(chunk_size).enumerate() {
         edge_ws::io::send(
@@ -234,18 +290,34 @@ pub async fn test_stream(
         if i % 10 == 0 {
             info!("  Sent chunk {}", i);
         }
-    }
-    info!("Audio sent! Keeping connection open for 10 seconds...");
 
-    // ---- Read responses for 10 seconds ----------------------------------------
+        // Drain any responses that arrived while we were sending.
+        while !done {
+            match embassy_time::with_timeout(RECV_POLL, edge_ws::io::recv(&mut conn, &mut recv_buf))
+                .await
+            {
+                Err(_timeout) => break, // nothing ready right now — send next chunk
+                Ok(Ok((frame_type, len))) => {
+                    done =
+                        handle_ws_frame(frame_type, &recv_buf[..len], &mut conn, mask_key, signal)
+                            .await;
+                }
+                Ok(Err(e)) => {
+                    info!("WebSocket recv error: {:?}", e);
+                    done = true;
+                }
+            }
+        }
+    }
+    info!("Audio sent! Keeping connection open for 5 seconds...");
+
+    // ---- Read remaining responses for up to 5 seconds -------------------------
     //
     // Every text frame is forwarded to the translation task immediately via
     // a Signal.  The translation task handles idle-timeout debouncing so
     // that rapid partial transcripts don't flood Google Translate.
 
-    let deadline = embassy_time::Instant::now() + Duration::from_secs(10);
-    let mut recv_buf = [0u8; 4096];
-    let mut done = false;
+    let deadline = embassy_time::Instant::now() + Duration::from_secs(5);
 
     while !done && embassy_time::Instant::now() < deadline {
         let remaining = deadline - embassy_time::Instant::now();
@@ -254,37 +326,13 @@ pub async fn test_stream(
             .await
         {
             Err(_timeout) => {
-                info!("10-second window elapsed.");
+                info!("5-second window elapsed.");
                 break;
             }
-            Ok(Ok((frame_type, len))) => match frame_type {
-                edge_ws::FrameType::Text(_) => {
-                    let json = core::str::from_utf8(&recv_buf[..len]).unwrap_or("<invalid UTF-8>");
-                    info!("Received: {}", json);
-                    signal.signal(translate::TranscriptMessage::DgJson(String::from(json)));
-                }
-                edge_ws::FrameType::Binary(_) => {
-                    info!("Received binary frame ({} bytes)", len);
-                }
-                edge_ws::FrameType::Close => {
-                    info!("WebSocket closed by server.");
-                    done = true;
-                }
-                edge_ws::FrameType::Ping => {
-                    info!("Ping received, sending pong");
-                    let _ = edge_ws::io::send(
-                        &mut conn,
-                        edge_ws::FrameType::Pong,
-                        Some(mask_key),
-                        &recv_buf[..len],
-                    )
+            Ok(Ok((frame_type, len))) => {
+                done = handle_ws_frame(frame_type, &recv_buf[..len], &mut conn, mask_key, signal)
                     .await;
-                    let _ = conn.flush().await;
-                }
-                other => {
-                    info!("Received {:?} frame ({} bytes)", other, len);
-                }
-            },
+            }
             Ok(Err(e)) => {
                 info!("WebSocket recv error: {:?}", e);
                 done = true;
