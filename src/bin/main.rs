@@ -15,6 +15,7 @@ mod display;
 use defmt::info;
 use embassy_executor::Spawner;
 use esp_backtrace as _;
+use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::dma_circular_buffers;
 use esp_hal::interrupt::software::SoftwareInterruptControl;
@@ -38,7 +39,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
-async fn main(spawner: Spawner) {
+async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
@@ -138,14 +139,6 @@ async fn main(spawner: Spawner) {
         delay,
     );
 
-    let fb = display::Framebuffer::new(480, 320);
-    let renderer = display::FontRenderer::default_font();
-
-    spawner
-        .spawn(display::bouncing_text(hw_display, fb, renderer))
-        .unwrap();
-    info!("Bouncing text task spawned");
-
     // ---- WiFi -----------------------------------------------------------------
 
     let network = elecrow_board::network::init(
@@ -158,7 +151,7 @@ async fn main(spawner: Spawner) {
     // ---- TLS initialization ---------------------------------------------------
 
     // True Random Number Generator + mbedTLS singleton.
-    // Stored in a StaticCell so the spawned translation task can hold a
+    // Stored in a StaticCell so the spawned tasks can hold a
     // `&'static Tls<'static>` reference.
     static TLS: StaticCell<mbedtls_rs::Tls<'static>> = StaticCell::new();
     let tls: &'static mbedtls_rs::Tls<'static> = TLS.init(net::init_global_tls(net::TlsHardware {
@@ -166,9 +159,67 @@ async fn main(spawner: Spawner) {
         adc1: peripherals.ADC1,
     }));
 
-    // ---- Deepgram connection + mic pipe read ----------------------------------
+    // ---- Framebuffer + font renderer -------------------------------------------
+    let fb = display::Framebuffer::new(480, 320);
+    info!(
+        "Framebuffer allocated — Heap used: {} bytes, free: {} bytes",
+        esp_alloc::HEAP.used(),
+        esp_alloc::HEAP.free()
+    );
 
-    let mut conn = net::deepgram_create_listen_socket(network, tls).await;
+    let renderer = display::FontRenderer::default_font();
+    info!(
+        "After font load — Heap used: {} bytes, free: {} bytes",
+        esp_alloc::HEAP.used(),
+        esp_alloc::HEAP.free()
+    );
 
-    elecrow_board::mic::send_audio_from_mic_pipe(&mut conn).await;
+    // ---- Shared signals --------------------------------------------------------
+
+    // Display signal — any task signals this to wake the display renderer.
+    static DISPLAY_SIGNAL: StaticCell<gramslator::app_state::DisplaySignal> = StaticCell::new();
+    let display_signal: &'static gramslator::app_state::DisplaySignal =
+        DISPLAY_SIGNAL.init(gramslator::app_state::DisplaySignal::new());
+
+    // Translate signal — the Deepgram task signals this to request a translation.
+    static TRANSLATE_SIGNAL: StaticCell<gramslator::translate::TranslateSignal> = StaticCell::new();
+    let translate_signal = TRANSLATE_SIGNAL.init(gramslator::translate::TranslateSignal::new());
+
+    // ---- Spawn tasks -----------------------------------------------------------
+
+    // Translation task (existing, now receives display_signal too).
+    let translate_signal = gramslator::translate::spawn_translation_task(
+        translate_signal,
+        &spawner,
+        network,
+        tls,
+        display_signal,
+    );
+
+    // Deepgram streaming task (persistent, reconnects on failure).
+    spawner
+        .spawn(elecrow_board::network::deepgram_task(
+            network,
+            tls,
+            translate_signal,
+            display_signal,
+        ))
+        .expect("Failed to spawn Deepgram task");
+    info!("Deepgram streaming task spawned");
+
+    // Display task (renders transcript + translation on signal).
+    spawner
+        .spawn(display::display_task(
+            hw_display,
+            fb,
+            renderer,
+            display_signal,
+        ))
+        .expect("Failed to spawn display task");
+    info!("Display task spawned");
+
+    // Main task has nothing else to do — just idle.
+    loop {
+        Timer::after(Duration::from_secs(60)).await;
+    }
 }
