@@ -21,6 +21,7 @@ use embassy_time::Duration;
 use embedded_io_async::{Read, Write};
 use mbedtls_rs::Tls;
 
+use crate::app_state::{self, DisplaySignal};
 use crate::net::Connection;
 
 /// Cached last translation: `(input_text, translated_text)`.
@@ -243,13 +244,17 @@ pub fn check_translation_cache(transcript: &str) -> Option<String> {
 }
 
 /// Translate a Deepgram transcript from English to Spanish via Google
-/// Translate, using the provided TLS session. Updates the translation cache
-/// on success.
+/// Translate, using the provided TLS session. Updates both the translation
+/// cache and the shared [`AppState`](crate::app_state) on success, then
+/// signals the display task.
 ///
 /// The caller is responsible for establishing the TLS session to
 /// `translation.googleapis.com:443` and closing it afterwards.
-pub async fn translate_response<S>(session: &mut S, transcript: &str)
-where
+pub async fn translate_response<S>(
+    session: &mut S,
+    transcript: &str,
+    display_signal: &DisplaySignal,
+) where
     S: Read + Write,
 {
     info!("Translating: \"{}\" (en -> es)...", transcript);
@@ -260,11 +265,16 @@ where
             let translated = core::str::from_utf8(&rx_buf[..len]).unwrap_or("<invalid UTF-8>");
             info!("Translation result: {}", translated);
 
-            // Update cache.
+            // Update local cache.
             critical_section::with(|cs| {
                 *LAST_TRANSLATION.borrow_ref_mut(cs) =
                     Some((String::from(transcript), String::from(translated)));
             });
+
+            // Update shared app state and wake the display.
+            if app_state::update_translation(translated) {
+                display_signal.signal(());
+            }
         }
         Err(e) => {
             error!("Translation failed: {:?}", e);
@@ -298,9 +308,10 @@ pub fn spawn_translation_task(
     spawner: &Spawner,
     network: embassy_net::Stack<'static>,
     tls: &'static Tls<'static>,
+    display_signal: &'static DisplaySignal,
 ) -> &'static TranslateSignal {
     spawner
-        .spawn(translation_task(signal, network, tls))
+        .spawn(translation_task(signal, network, tls, display_signal))
         .expect("Failed to spawn translation task");
 
     signal
@@ -316,11 +327,16 @@ const TRANSLATE_DEBOUNCE_DEADLINE: Duration = Duration::from_secs(1);
 /// Background task that receives Deepgram JSON via a signal, debounces
 /// rapid partial transcripts, then translates the latest one (en -> es)
 /// via Google Translate.  Skips the TLS round-trip on cache hits.
+///
+/// After a successful translation (or cache hit), the shared
+/// [`AppState`](crate::app_state) is updated and the display task is
+/// woken via `display_signal`.
 #[embassy_executor::task]
 async fn translation_task(
     signal: &'static TranslateSignal,
     stack: embassy_net::Stack<'static>,
     tls: &'static Tls<'static>,
+    display_signal: &'static DisplaySignal,
 ) {
     loop {
         // Block until the first transcript arrives.
@@ -364,6 +380,10 @@ async fn translation_task(
         // Check cache — skip the network round-trip on hit.
         if let Some(result) = check_translation_cache(transcript) {
             info!("Translation cache hit: \"{}\"", result.as_str());
+            // Update shared state + wake display even on cache hits.
+            if app_state::update_translation(result.as_str()) {
+                display_signal.signal(());
+            }
             continue;
         }
 
@@ -376,7 +396,7 @@ async fn translation_task(
                 }
             };
 
-        translate_response(&mut conn, transcript).await;
+        translate_response(&mut conn, transcript, display_signal).await;
 
         // Close the connection cleanly so that PSA crypto resources are
         // released before the Session is dropped.
