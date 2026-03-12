@@ -1,3 +1,6 @@
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU8, Ordering};
+
 use alloc::boxed::Box;
 use alloc::ffi::CString;
 
@@ -16,17 +19,73 @@ use static_cell::StaticCell;
 
 extern crate alloc;
 
-// ---- Buffer pool for concurrent TCP connections ----------------------------
+// ---- Reusable buffer pool for concurrent TCP connections -------------------
 
 pub const MAX_CONNECTIONS: usize = 4;
 const TCP_RX_SIZE: usize = 16384;
 const TCP_TX_SIZE: usize = 4096;
 const MAX_TCP_RETRIES: usize = 5;
 
-static RX_BUFS: [StaticCell<[u8; TCP_RX_SIZE]>; MAX_CONNECTIONS] =
-    [const { StaticCell::new() }; MAX_CONNECTIONS];
-static TX_BUFS: [StaticCell<[u8; TCP_TX_SIZE]>; MAX_CONNECTIONS] =
-    [const { StaticCell::new() }; MAX_CONNECTIONS];
+/// Bitmask tracking which buffer slots are currently in use.
+/// Bit `i` set = slot `i` is claimed. Atomic so it is safe across tasks.
+static POOL_IN_USE: AtomicU8 = AtomicU8::new(0);
+
+struct BufSlot<const N: usize>(UnsafeCell<[u8; N]>);
+
+// SAFETY: Access is guarded by the POOL_IN_USE atomic bitmask — only the task
+// that successfully claims a slot may access its buffers.
+unsafe impl<const N: usize> Sync for BufSlot<N> {}
+
+static RX_BUFS: [BufSlot<TCP_RX_SIZE>; MAX_CONNECTIONS] =
+    [const { BufSlot(UnsafeCell::new([0; TCP_RX_SIZE])) }; MAX_CONNECTIONS];
+static TX_BUFS: [BufSlot<TCP_TX_SIZE>; MAX_CONNECTIONS] =
+    [const { BufSlot(UnsafeCell::new([0; TCP_TX_SIZE])) }; MAX_CONNECTIONS];
+
+/// Try to claim a free buffer slot. Returns the slot index and mutable
+/// references to the rx/tx buffers on success.
+fn claim_buffers() -> Result<
+    (
+        usize,
+        &'static mut [u8; TCP_RX_SIZE],
+        &'static mut [u8; TCP_TX_SIZE],
+    ),
+    ConnectionError,
+> {
+    loop {
+        let current = POOL_IN_USE.load(Ordering::Acquire);
+        for i in 0..MAX_CONNECTIONS {
+            let bit = 1u8 << i;
+            if current & bit == 0 {
+                // Try to atomically set this bit.
+                if POOL_IN_USE
+                    .compare_exchange(current, current | bit, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    // SAFETY: We just exclusively claimed slot `i` via the
+                    // atomic CAS. No other task can access these buffers
+                    // until we release the bit.
+                    let rx = unsafe { &mut *RX_BUFS[i].0.get() };
+                    let tx = unsafe { &mut *TX_BUFS[i].0.get() };
+                    // Zero the buffers for the new connection.
+                    rx.fill(0);
+                    tx.fill(0);
+                    return Ok((i, rx, tx));
+                }
+                // CAS failed — another task grabbed a slot; retry.
+                break;
+            }
+        }
+        if POOL_IN_USE.load(Ordering::Acquire).count_ones() as usize >= MAX_CONNECTIONS {
+            return Err(ConnectionError::NoFreeBuffers);
+        }
+    }
+}
+
+/// Release a previously claimed buffer slot so it can be reused.
+fn release_slot(index: usize) {
+    let bit = 1u8 << index;
+    POOL_IN_USE.fetch_and(!bit, Ordering::Release);
+}
 
 // ---- Error type ------------------------------------------------------------
 
@@ -57,8 +116,13 @@ enum ConnectionInner<'a> {
 /// May be either an encrypted TLS session (HTTPS) or a plain TCP connection
 /// (HTTP). Implements `embedded_io_async::Read` and `Write` so callers can
 /// use it generically regardless of the transport.
+///
+/// The connection holds a buffer-pool slot that is released when `close()` is
+/// called. Callers **must** call `close()` before dropping.
 pub struct Connection<'a> {
     inner: ConnectionInner<'a>,
+    /// Index into the static buffer pool. Released on close.
+    slot: usize,
 }
 
 impl<'a> Connection<'a> {
@@ -71,7 +135,7 @@ impl<'a> Connection<'a> {
         tls: &'a Tls<'_>,
     ) -> Result<Self, ConnectionError> {
         // 1. DNS + TCP connect (shared logic)
-        let socket = Self::connect_tcp(network, host, port).await?;
+        let (slot, socket) = Self::connect_tcp(network, host, port).await?;
 
         // 2. Build TLS config
         //    server_name must outlive the Session, so we leak a tiny heap CString.
@@ -86,19 +150,25 @@ impl<'a> Connection<'a> {
         });
 
         // 3. Create TLS session
-        let mut session = Session::new(tls.reference(), socket, &tls_config)
-            .map_err(ConnectionError::TlsSessionCreate)?;
+        let mut session = match Session::new(tls.reference(), socket, &tls_config) {
+            Ok(s) => s,
+            Err(e) => {
+                release_slot(slot);
+                return Err(ConnectionError::TlsSessionCreate(e));
+            }
+        };
 
         // 4. TLS handshake
         info!("TLS handshake...");
-        session
-            .connect()
-            .await
-            .map_err(ConnectionError::TlsHandshake)?;
+        if let Err(e) = session.connect().await {
+            release_slot(slot);
+            return Err(ConnectionError::TlsHandshake(e));
+        }
         info!("TLS established!");
 
         Ok(Self {
             inner: ConnectionInner::Tls(session),
+            slot,
         })
     }
 
@@ -109,9 +179,10 @@ impl<'a> Connection<'a> {
         host: &str,
         port: u16,
     ) -> Result<Self, ConnectionError> {
-        let socket = Self::connect_tcp(network, host, port).await?;
+        let (slot, socket) = Self::connect_tcp(network, host, port).await?;
         Ok(Self {
             inner: ConnectionInner::Tcp(socket),
+            slot,
         })
     }
 
@@ -120,12 +191,12 @@ impl<'a> Connection<'a> {
         network: embassy_net::Stack<'static>,
         host: &str,
         port: u16,
-    ) -> Result<TcpSocket<'static>, ConnectionError> {
+    ) -> Result<(usize, TcpSocket<'static>), ConnectionError> {
         // 1. DNS resolution
         let remote_ip = resolve_dns(network, host).await?;
 
         // 2. Claim a free buffer pair from the static pool
-        let (rx_buf, tx_buf) = Self::claim_buffers()?;
+        let (slot, rx_buf, tx_buf) = claim_buffers()?;
 
         // 3. Create and configure the TCP socket
         let mut socket = TcpSocket::new(network, rx_buf, tx_buf);
@@ -151,13 +222,14 @@ impl<'a> Connection<'a> {
             }
         }
         if let Some(e) = last_err {
+            release_slot(slot);
             return Err(ConnectionError::TcpConnect(e));
         }
 
-        Ok(socket)
+        Ok((slot, socket))
     }
 
-    /// Close the connection cleanly.
+    /// Close the connection cleanly and release its buffer-pool slot.
     ///
     /// For TLS connections this performs the TLS close_notify handshake.
     /// For plain TCP connections this closes the socket.
@@ -172,28 +244,7 @@ impl<'a> Connection<'a> {
                 socket.close();
             }
         }
-    }
-
-    #[allow(
-        clippy::large_stack_frames,
-        reason = "zero-init arrays are optimized to memset by the compiler"
-    )]
-    fn claim_buffers() -> Result<
-        (
-            &'static mut [u8; TCP_RX_SIZE],
-            &'static mut [u8; TCP_TX_SIZE],
-        ),
-        ConnectionError,
-    > {
-        for i in 0..MAX_CONNECTIONS {
-            if let Some(rx) = RX_BUFS[i].try_init([0; TCP_RX_SIZE]) {
-                let tx = TX_BUFS[i]
-                    .try_init([0; TCP_TX_SIZE])
-                    .expect("buffer pool rx/tx out of sync");
-                return Ok((rx, tx));
-            }
-        }
-        Err(ConnectionError::NoFreeBuffers)
+        release_slot(self.slot);
     }
 }
 
