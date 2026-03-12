@@ -7,9 +7,14 @@ fn main() {
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 }
 
-/// Override esp-hal's default `memory.x` to increase the flash-mapped segment
-/// sizes from 4 MB to 16 MB so that large `include_bytes!` assets (e.g. fonts)
-/// fit in the binary.
+/// Override esp-hal's default `memory.x` to extend the flash-mapped segment
+/// sizes from 4 MB to 16 MB, matching the physical flash capacity.
+///
+/// Large read-only assets (fonts, etc.) now live in dedicated flash
+/// partitions mapped at runtime via [`gramslator::flash_data`], so the
+/// application binary itself is small.  The 16 MB limit simply reflects
+/// the hardware maximum; the linker only emits what the code actually
+/// references.
 ///
 /// We write our version to `OUT_DIR` and add it as a linker search path.
 /// Cargo processes the current crate's search paths before dependencies, so

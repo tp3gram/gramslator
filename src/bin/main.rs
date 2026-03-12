@@ -169,9 +169,15 @@ async fn main(spawner: Spawner) -> ! {
         esp_alloc::HEAP.free()
     );
 
-    let renderer = rendering::FontRenderer::default_font();
+    // The font lives in a dedicated flash partition (flashed once with
+    // `espflash write-bin`) so it doesn't bloat the app image.  We map it
+    // into the CPU address space via the MMU at runtime.
+    const FONT_PARTITION_OFFSET: u32 = 0xA0_0000; // must match partitions.csv
+    const FONT_SIZE: usize = 5_369_728; // exact byte size of NotoSansJP-Medium.ttf
+    let font_data = gramslator::flash_data::map_flash_region(FONT_PARTITION_OFFSET, FONT_SIZE);
+    let renderer = rendering::FontRenderer::new(font_data);
     info!(
-        "After font load — Heap used: {} bytes, free: {} bytes",
+        "After font mapping — Heap used: {} bytes, free: {} bytes",
         esp_alloc::HEAP.used(),
         esp_alloc::HEAP.free()
     );

@@ -7,6 +7,7 @@ pub const SAMPLE_RATE: u32 = 8_000;
 
 pub mod app_state;
 pub mod elecrow_board;
+pub mod flash_data;
 pub mod networking;
 pub mod rendering;
 pub mod translation;

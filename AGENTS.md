@@ -37,12 +37,14 @@ No test directories or test targets exist.
 ```
 Cargo.toml              # Manifest: dependencies, profiles, bin target
 build.rs                # Linker script setup + friendly error diagnostics
+partitions.csv          # ESP-IDF partition table (app + font data)
 rust-toolchain.toml     # ESP Rust toolchain channel
 .cargo/config.toml      # Target, runner, rustflags, build-std, env
 .clippy.toml            # stack-size-threshold = 1024
 .env                    # Runtime secrets (WiFi creds, API keys) - gitignored
 src/
   lib.rs                # Library crate root (#![no_std] only)
+  flash_data.rs         # MMU-based flash partition mapping (font data, etc.)
   bin/main.rs           # Binary entry point (async main, hardware init)
 ```
 
