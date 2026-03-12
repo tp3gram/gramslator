@@ -49,8 +49,7 @@ async fn main(_spawner: Spawner) -> ! {
         elecrow_board::mic::MicHardware {
             i2s: peripherals.I2S0,
             dma_channel: peripherals.DMA_CH0,
-            bclk_pin: peripherals.GPIO9,
-            ws_pin: peripherals.GPIO3,
+            clk_pin: peripherals.GPIO9,
             din_pin: peripherals.GPIO10,
         },
         rx_descriptors,
