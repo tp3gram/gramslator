@@ -208,6 +208,10 @@ pub struct Framebuffer {
     buf: Vec<u8>,
     /// Bounding box of all modifications since the last [`flush`](Self::flush).
     dirty: Option<Rectangle>,
+    /// Optional clip rectangle — when set, all drawing operations are
+    /// restricted to this region.  Pixels outside the clip are silently
+    /// discarded.  Use [`set_clip`](Self::set_clip) to enable/disable.
+    clip: Option<Rectangle>,
 }
 
 impl Framebuffer {
@@ -223,6 +227,7 @@ impl Framebuffer {
             height,
             buf,
             dirty: None,
+            clip: None,
         }
     }
 
@@ -236,10 +241,34 @@ impl Framebuffer {
         self.dirty
     }
 
-    /// Union a rectangle into the dirty tracker (clamped to FB bounds).
+    /// Set (or clear) the clip rectangle.
+    ///
+    /// When set, all drawing operations are restricted to pixels inside
+    /// this rectangle.  Pass `None` to disable clipping.
+    pub fn set_clip(&mut self, clip: Option<Rectangle>) {
+        self.clip = clip;
+    }
+
+    /// Check whether a pixel coordinate falls inside the current clip rect.
+    #[inline]
+    fn clip_contains(&self, x: u32, y: u32) -> bool {
+        match &self.clip {
+            None => true,
+            Some(c) => {
+                let cx = c.top_left.x as u32;
+                let cy = c.top_left.y as u32;
+                x >= cx && x < cx + c.size.width && y >= cy && y < cy + c.size.height
+            }
+        }
+    }
+
+    /// Union a rectangle into the dirty tracker (clamped to FB bounds and clip).
     fn mark_dirty(&mut self, rect: Rectangle) {
         let fb_rect = Rectangle::new(Point::new(0, 0), Size::new(self.width, self.height));
-        let clamped = rect.intersection(&fb_rect);
+        let mut clamped = rect.intersection(&fb_rect);
+        if let Some(ref clip) = self.clip {
+            clamped = clamped.intersection(clip);
+        }
         if clamped.size.width == 0 || clamped.size.height == 0 {
             return;
         }
@@ -340,7 +369,12 @@ impl DrawTarget for Framebuffer {
         for Pixel(point, color) in pixels {
             let x = point.x;
             let y = point.y;
-            if x >= 0 && y >= 0 && (x as u32) < self.width && (y as u32) < self.height {
+            if x >= 0
+                && y >= 0
+                && (x as u32) < self.width
+                && (y as u32) < self.height
+                && self.clip_contains(x as u32, y as u32)
+            {
                 self.set_px(x as u32, y as u32, color);
                 min_x = min_x.min(x);
                 min_y = min_y.min(y);
@@ -374,7 +408,12 @@ impl DrawTarget for Framebuffer {
         for color in colors {
             let px = area.top_left.x + col as i32;
             let py = area.top_left.y + row as i32;
-            if px >= 0 && py >= 0 && (px as u32) < self.width && (py as u32) < self.height {
+            if px >= 0
+                && py >= 0
+                && (px as u32) < self.width
+                && (py as u32) < self.height
+                && self.clip_contains(px as u32, py as u32)
+            {
                 let idx = ((py as u32 * self.width + px as u32) * 3) as usize;
                 self.buf[idx] = color.r();
                 self.buf[idx + 1] = color.g();
@@ -391,7 +430,10 @@ impl DrawTarget for Framebuffer {
 
     fn fill_solid(&mut self, area: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {
         let fb_rect = Rectangle::new(Point::new(0, 0), Size::new(self.width, self.height));
-        let clipped = area.intersection(&fb_rect);
+        let mut clipped = area.intersection(&fb_rect);
+        if let Some(ref clip) = self.clip {
+            clipped = clipped.intersection(clip);
+        }
         if clipped.size.width == 0 || clipped.size.height == 0 {
             return Ok(());
         }
@@ -1020,32 +1062,169 @@ const SCREEN_H: i32 = 320;
 /// Horizontal padding from the screen edges.
 const H_PAD: i32 = 8;
 
-/// Y coordinate where the transcript region starts (top of screen).
-const TRANSCRIPT_Y: i32 = 4;
+/// ---- Translation region (top ~2/3 of screen) ----
+/// Y coordinate where the translation region starts (top of screen).
+const TRANSLATION_Y: i32 = 4;
+/// Font size (px) for the translation.
+const TRANSLATION_PX: f32 = 48.0;
+/// Foreground colour for the translation text.
+const TRANSLATION_COLOR: Rgb666 = Rgb666::new(32, 58, 63); // light cyan
+
+/// Y coordinate of the separator line between regions.
+const SEPARATOR_Y: i32 = 213;
+
+/// ---- Transcript region (bottom ~1/3 of screen) ----
+/// Y coordinate where the transcript region starts.
+const TRANSCRIPT_Y: i32 = SEPARATOR_Y + 5;
 /// Font size (px) for the transcript.
 const TRANSCRIPT_PX: f32 = 20.0;
 /// Foreground colour for the transcript text.
 const TRANSCRIPT_COLOR: Rgb666 = Rgb666::new(48, 48, 48); // light grey
 
-/// Y coordinate of the separator line between regions.
-const SEPARATOR_Y: i32 = 107;
-
-/// Y coordinate where the translation region starts.
-const TRANSLATION_Y: i32 = SEPARATOR_Y + 5;
-/// Font size (px) for the translation.
-const TRANSLATION_PX: f32 = 36.0;
-/// Foreground colour for the translation text.
-const TRANSLATION_COLOR: Rgb666 = Rgb666::new(40, 63, 40); // light green
-
 /// Background colour for the entire screen.
 const BG: Rgb666 = Rgb666::BLACK;
 
-/// Embassy task: renders the current transcript (small, top) and translation
-/// (large, bottom 2/3) whenever the display signal fires.
+/// Scroll animation speed in pixels per second.
+const SCROLL_SPEED: f32 = 700.0;
+/// Duration of one animation frame (~30 fps).
+const ANIM_FRAME_MS: u64 = 33;
+const ANIM_FRAME_DURATION: embassy_time::Duration = embassy_time::Duration::from_millis(ANIM_FRAME_MS);
+
+// ===========================================================================
+// Per-section scroll / animation state
+// ===========================================================================
+
+/// Tracks the word-wrapped text, total height, and scroll animation for one
+/// display section (translation or transcript).
+struct Section {
+    /// Word-wrapped lines (cached so we don't re-wrap every animation frame).
+    lines: Vec<String>,
+    /// Total height of the wrapped text in pixels.
+    total_height: f32,
+    /// Current vertical scroll offset (0 = no scroll, positive = scrolled up).
+    scroll_offset: f32,
+    /// Target scroll offset the animation is heading toward.
+    scroll_target: f32,
+    /// Whether this section needs to be redrawn on the next frame.
+    needs_redraw: bool,
+}
+
+impl Section {
+    fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            total_height: 0.0,
+            scroll_offset: 0.0,
+            scroll_target: 0.0,
+            needs_redraw: false,
+        }
+    }
+
+    /// Recompute word-wrap and recalculate the scroll target.
+    ///
+    /// The current scroll offset is **preserved** (clamped to the new
+    /// target) so that incoming partial-transcript updates don't jerk the
+    /// view back to the top while the user is still reading.
+    fn update_text(
+        &mut self,
+        text: &str,
+        renderer: &FontRenderer,
+        px: f32,
+        max_width: f32,
+        section_height: f32,
+    ) {
+        self.lines = word_wrap(renderer, text, px, max_width);
+        let line_h = renderer.line_height(px) + 2.0;
+        self.total_height = self.lines.len() as f32 * line_h;
+        self.scroll_target = if self.total_height > section_height {
+            self.total_height - section_height
+        } else {
+            0.0
+        };
+        // Clamp the current offset so it never exceeds the new target
+        // (e.g. when the text got shorter).
+        if self.scroll_offset > self.scroll_target {
+            self.scroll_offset = self.scroll_target;
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Returns `true` if a scroll animation is still in progress.
+    fn is_animating(&self) -> bool {
+        self.scroll_target - self.scroll_offset > 0.5
+    }
+
+    /// Advance the scroll animation by `amount` pixels.  Sets
+    /// `needs_redraw` if the offset actually changed.
+    fn advance(&mut self, amount: f32) {
+        if self.is_animating() {
+            self.scroll_offset = (self.scroll_offset + amount).min(self.scroll_target);
+            self.needs_redraw = true;
+        }
+    }
+}
+
+/// Render a section's text into the framebuffer with clipping and scroll.
 ///
-/// The task waits on the `display_signal`, reads the shared
-/// [`AppState`](gramslator::app_state), word-wraps the text, and flushes
-/// only the dirty regions to the hardware display via async DMA.
+/// The clip rectangle is set to `[0, section_y) .. [SCREEN_W, section_y + section_height)`
+/// so that glyphs straddling the boundary are cleanly cut off.
+fn render_section(
+    fb: &mut Framebuffer,
+    renderer: &mut FontRenderer,
+    section: &Section,
+    px: f32,
+    color: Rgb666,
+    section_y: i32,
+    section_height: i32,
+) {
+    // Clip all drawing to this section's bounds.
+    fb.set_clip(Some(Rectangle::new(
+        Point::new(0, section_y),
+        Size::new(SCREEN_W as u32, section_height as u32),
+    )));
+
+    // Clear the section.
+    let clear_rect = Rectangle::new(
+        Point::new(0, section_y),
+        Size::new(SCREEN_W as u32, section_height as u32),
+    );
+    fb.fill_solid(&clear_rect, BG).unwrap();
+
+    // Render word-wrapped lines, offset by the scroll amount.
+    let line_h = renderer.line_height(px) as i32 + 2;
+    let mut y = section_y - section.scroll_offset as i32;
+
+    for line in &section.lines {
+        // Skip lines that are entirely above the visible section.
+        if y + line_h <= section_y {
+            y += line_h;
+            continue;
+        }
+        // Stop once we're entirely below the section.
+        if y >= section_y + section_height {
+            break;
+        }
+        renderer
+            .draw_text(fb, line, Point::new(H_PAD, y), px, color, BG)
+            .unwrap();
+        y += line_h;
+    }
+
+    // Remove clip so subsequent operations are unrestricted.
+    fb.set_clip(None);
+}
+
+// ===========================================================================
+// Display task — live transcript + translation renderer with scroll animation
+// ===========================================================================
+
+/// Embassy task: renders the current translation (large, top 2/3) and
+/// transcript (small, bottom 1/3).
+///
+/// When text overflows its section, an automatic scroll animation reveals
+/// the remaining lines at a comfortable reading speed.  Each section is
+/// clipped to its bounds, so scrolling text in the bottom section never
+/// bleeds above the separator.
 #[embassy_executor::task]
 pub async fn display_task(
     mut hw_display: gramslator::elecrow_board::display::AsyncDisplay<'static>,
@@ -1053,91 +1232,97 @@ pub async fn display_task(
     mut renderer: FontRenderer,
     display_signal: &'static gramslator::app_state::DisplaySignal,
 ) {
-    // Maximum usable width for text.
     let max_text_width = (SCREEN_W - 2 * H_PAD) as f32;
+    let translation_section_h = SEPARATOR_Y - TRANSLATION_Y;
+    let transcript_section_h = SCREEN_H - TRANSCRIPT_Y;
+    let scroll_per_frame = SCROLL_SPEED * (ANIM_FRAME_MS as f32 / 1000.0);
 
-    // Initial full-screen clear + separator line.
+    // Initial full-screen clear + separator.
     fb.clear(BG).unwrap();
     draw_separator(&mut fb);
     fb.flush_async(&mut hw_display).await.unwrap();
     info!("Display task started — waiting for state updates");
 
-    // Remember what was last rendered so we can skip redundant redraws.
     let mut last_transcript = String::new();
     let mut last_translation = String::new();
+    let mut translation_sec = Section::new();
+    let mut transcript_sec = Section::new();
 
     loop {
-        // Block until something changes.
-        display_signal.wait().await;
+        // If either section is animating, poll with a short timeout so we
+        // keep advancing the scroll.  Otherwise block on the signal.
+        let animating = translation_sec.is_animating() || transcript_sec.is_animating();
+        if animating {
+            // Either a new signal arrives, or we get a timeout (animation tick).
+            let _ = embassy_time::with_timeout(ANIM_FRAME_DURATION, display_signal.wait()).await;
+        } else {
+            display_signal.wait().await;
+        }
 
-        // Read the latest state.
+        // ---- Check for updated text ------------------------------------
         let (transcript, translation) = gramslator::app_state::read_state();
 
-        let transcript_changed = transcript != last_transcript;
-        let translation_changed = translation != last_translation;
-
-        if !transcript_changed && !translation_changed {
-            continue;
-        }
-
-        // ---- Transcript region (top 1/3) --------------------------------
-        if transcript_changed {
-            // Clear the transcript region.
-            let transcript_region = Rectangle::new(
-                Point::new(0, 0),
-                Size::new(SCREEN_W as u32, SEPARATOR_Y as u32),
+        if translation != last_translation {
+            translation_sec.update_text(
+                &translation,
+                &renderer,
+                TRANSLATION_PX,
+                max_text_width,
+                translation_section_h as f32,
             );
-            fb.fill_solid(&transcript_region, BG).unwrap();
-            draw_separator(&mut fb);
-
-            // Word-wrap and render.
-            let lines = word_wrap(&renderer, &transcript, TRANSCRIPT_PX, max_text_width);
-            let line_h = renderer.line_height(TRANSCRIPT_PX) as i32 + 2;
-            let mut y = TRANSCRIPT_Y;
-            for line in &lines {
-                if y + line_h > SEPARATOR_Y {
-                    break; // don't overflow into the translation region
-                }
-                renderer
-                    .draw_text(&mut fb, line, Point::new(H_PAD, y), TRANSCRIPT_PX, TRANSCRIPT_COLOR, BG)
-                    .unwrap();
-                y += line_h;
-            }
-
-            last_transcript.clear();
-            last_transcript.push_str(&transcript);
+            last_translation = translation;
         }
-
-        // ---- Translation region (bottom 2/3) ----------------------------
-        if translation_changed {
-            // Clear the translation region.
-            let translation_region = Rectangle::new(
-                Point::new(0, TRANSLATION_Y),
-                Size::new(SCREEN_W as u32, (SCREEN_H - TRANSLATION_Y) as u32),
+        if transcript != last_transcript {
+            transcript_sec.update_text(
+                &transcript,
+                &renderer,
+                TRANSCRIPT_PX,
+                max_text_width,
+                transcript_section_h as f32,
             );
-            fb.fill_solid(&translation_region, BG).unwrap();
-
-            // Word-wrap and render.
-            let lines = word_wrap(&renderer, &translation, TRANSLATION_PX, max_text_width);
-            let line_h = renderer.line_height(TRANSLATION_PX) as i32 + 2;
-            let mut y = TRANSLATION_Y;
-            for line in &lines {
-                if y + line_h > SCREEN_H {
-                    break; // don't overflow off screen
-                }
-                renderer
-                    .draw_text(&mut fb, line, Point::new(H_PAD, y), TRANSLATION_PX, TRANSLATION_COLOR, BG)
-                    .unwrap();
-                y += line_h;
-            }
-
-            last_translation.clear();
-            last_translation.push_str(&translation);
+            last_transcript = transcript;
         }
 
-        // ---- Flush dirty regions ----------------------------------------
-        if let Err(e) = fb.flush_async(&mut hw_display).await {
-            info!("Display flush error: {:?}", e);
+        // ---- Advance scroll animations ---------------------------------
+        translation_sec.advance(scroll_per_frame);
+        transcript_sec.advance(scroll_per_frame);
+
+        // ---- Render sections that need it ------------------------------
+        if translation_sec.needs_redraw {
+            render_section(
+                &mut fb,
+                &mut renderer,
+                &translation_sec,
+                TRANSLATION_PX,
+                TRANSLATION_COLOR,
+                TRANSLATION_Y,
+                translation_section_h,
+            );
+            translation_sec.needs_redraw = false;
+        }
+
+        if transcript_sec.needs_redraw {
+            render_section(
+                &mut fb,
+                &mut renderer,
+                &transcript_sec,
+                TRANSCRIPT_PX,
+                TRANSCRIPT_COLOR,
+                TRANSCRIPT_Y,
+                transcript_section_h,
+            );
+            transcript_sec.needs_redraw = false;
+        }
+
+        // Always redraw the separator (covers any potential bleed from the
+        // translation section's descenders).
+        draw_separator(&mut fb);
+
+        // ---- Flush dirty regions ---------------------------------------
+        if fb.is_dirty() {
+            if let Err(e) = fb.flush_async(&mut hw_display).await {
+                info!("Display flush error: {:?}", e);
+            }
         }
     }
 }
