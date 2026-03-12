@@ -2,7 +2,7 @@
 //!
 //! This module is display-hardware-agnostic — it works with any
 //! `embedded_graphics::DrawTarget`.  Hardware-specific initialization
-//! lives in [`elecrow_board::display`](super::elecrow_board::display).
+//! lives in [`elecrow_board::display`](gramslator::elecrow_board::display).
 //!
 //! Two text-drawing approaches are provided:
 //!
@@ -299,7 +299,7 @@ impl Framebuffer {
     /// Returns the number of pixels pushed (0 if nothing was dirty).
     pub async fn flush_async(
         &mut self,
-        display: &mut crate::elecrow_board::display::AsyncDisplay<'_>,
+        display: &mut gramslator::elecrow_board::display::AsyncDisplay<'_>,
     ) -> Result<usize, esp_hal::spi::Error> {
         let dirty = match self.dirty.take() {
             Some(d) => d,
@@ -986,7 +986,7 @@ impl Xorshift32 {
 /// screensaver, logging FPS every second.
 #[embassy_executor::task]
 pub async fn bouncing_text(
-    mut hw_display: super::elecrow_board::display::AsyncDisplay<'static>,
+    mut hw_display: gramslator::elecrow_board::display::AsyncDisplay<'static>,
     mut fb: Framebuffer,
     mut renderer: FontRenderer,
 ) {
