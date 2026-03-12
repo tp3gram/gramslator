@@ -8,6 +8,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+mod display;
 mod elecrow_board;
 
 use defmt::info;
@@ -23,6 +24,10 @@ extern crate alloc;
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
 
 #[allow(
     clippy::large_stack_frames,
@@ -64,7 +69,14 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
-    // ---- WiFi -----------------------------------------------------------------
+    // ---- Heap diagnostics -------------------------------------------------------
+    info!(
+        "Heap free: {} bytes, used: {} bytes",
+        esp_alloc::HEAP.free(),
+        esp_alloc::HEAP.used()
+    );
+
+    /* // ---- WiFi -----------------------------------------------------------------
 
     let network = elecrow_board::network::init(
         elecrow_board::network::NetworkHardware {
@@ -82,8 +94,57 @@ async fn main(spawner: Spawner) -> ! {
         adc1: peripherals.ADC1,
     });
 
-    elecrow_board::network::test_stream(network, &tls).await;
+    elecrow_board::network::test_stream(network, &tls).await; */
 
+    // ---- Display (SPI + async DMA) ---------------------------------------------
+    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
+        esp_hal::dma_buffers!(4, 4092);
+    let dma_rx_buf =
+        esp_hal::dma::DmaRxBuf::new(rx_descriptors, rx_buffer).expect("DMA RX buf");
+    let dma_tx_buf =
+        esp_hal::dma::DmaTxBuf::new(tx_descriptors, tx_buffer).expect("DMA TX buf");
+
+    let delay = esp_hal::delay::Delay::new();
+    let hw_display = elecrow_board::display::init(
+        elecrow_board::display::DisplayHardware {
+            spi: elecrow_board::display::DisplaySPIBus {
+                spi_peripheral: peripherals.SPI2,
+                sck: peripherals.GPIO42,
+                mosi: peripherals.GPIO39,
+                data_command: peripherals.GPIO41,
+                chip_select: peripherals.GPIO40,
+            },
+            pin_tft_power: peripherals.GPIO14,
+            pin_backlight: peripherals.GPIO38,
+        },
+        peripherals.DMA_CH0,
+        dma_rx_buf,
+        dma_tx_buf,
+        delay,
+    );
+
+    // ---- Framebuffer + font renderer -------------------------------------------
+    let fb = display::Framebuffer::new(480, 320);
+    info!(
+        "Framebuffer allocated — Heap used: {} bytes, free: {} bytes",
+        esp_alloc::HEAP.used(),
+        esp_alloc::HEAP.free()
+    );
+
+    let renderer = display::FontRenderer::default_font();
+    info!(
+        "After font load — Heap used: {} bytes, free: {} bytes",
+        esp_alloc::HEAP.used(),
+        esp_alloc::HEAP.free()
+    );
+
+    // ---- Spawn the bouncing-text screensaver -----------------------------------
+    spawner
+        .spawn(display::bouncing_text(hw_display, fb, renderer))
+        .unwrap();
+    info!("Bouncing text task spawned");
+
+    // Main task has nothing else to do — just idle.
     loop {
         Timer::after(Duration::from_secs(60)).await;
     }
