@@ -2,6 +2,7 @@ use esp_hal::Blocking;
 use esp_hal::dma::DmaDescriptor;
 use esp_hal::i2s::master::{Config, DataFormat, I2s, I2sRx};
 use esp_hal::peripherals::{DMA_CH0, GPIO9, GPIO10, I2S0};
+use defmt::info;
 use esp_hal::time::Rate;
 
 pub struct MicHardware<'a> {
@@ -18,9 +19,24 @@ pub struct MicHardware<'a> {
 /// esp-hal 1.0 only supports TDM mode, so we initialize I2S in TDM mode to get DMA and clocks
 /// working, then patch the I2S0 registers to switch to PDM RX with hardware PDM→PCM conversion.
 ///
-/// The clock trick: setting `sample_rate=78125` with `Data16Channel16` stereo produces
-/// `bclk = 78125 × 2 × 16 = 2.5 MHz` and `bclk_div = 8`, giving the mic its required
-/// ~2.5 MHz PDM clock. With DSR_8S (÷64), the PCM output rate is ~39 kHz.
+/// The clock trick: `pcm_sample_rate` is the target PCM output rate. The I2S sample rate is
+/// derived at runtime so that the PDM clock lands at the right frequency for the mic (1–3.25 MHz)
+/// and DSR_8S (÷64) decimation produces the desired PCM rate:
+///
+/// ```text
+/// i2s_rate = pcm_sample_rate × DSR_DIVISOR / BITS_PER_FRAME
+///          = pcm_sample_rate × 64 / 32
+///          = pcm_sample_rate × 2
+/// bclk     = i2s_rate × 2 × 16      = pcm_sample_rate × 64   (PDM clock on WS pin)
+/// mclk     = i2s_rate × 256          = pcm_sample_rate × 512
+/// mclk_div = 160 MHz / mclk
+/// bclk_div = mclk / bclk = 256 / 32 = 8                      (PDM minimum)
+/// pcm_rate = bclk / 64              = pcm_sample_rate         ✓
+/// ```
+///
+/// E.g. `pcm_sample_rate = 16_000`:
+///   `i2s_rate = 32,000`, `bclk = 1,024,000 Hz`, `mclk = 8,192,000 Hz`,
+///   `mclk_div = 160 MHz / 8.192 MHz ≈ 19.5` (fractional), `bclk_div = 8`.
 ///
 /// Closest datasheet for `LMD3526B261-OFA03`: <https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8604442987128901632>
 /// Datasheet provided by ELECROW: <https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320/blob/master/Datasheet/INMP441-Datasheet.pdf>
@@ -32,19 +48,31 @@ pub struct MicHardware<'a> {
 pub fn init<'d>(
     mic_hardware: MicHardware<'d>,
     dma_rx_descriptors: &'static mut [DmaDescriptor],
+    pcm_sample_rate: u32,
 ) -> I2sRx<'d, Blocking> {
     // Step 1: Init I2S in TDM mode via esp-hal.
-    // sample_rate=78125 tricks esp-hal into generating a 2.5 MHz PDM clock:
-    //   bclk = 78125 * 2 * 16 = 2,500,000 Hz  (PDM clock on WS pin)
-    //   mclk = 78125 * 256    = 20,000,000 Hz
-    //   mclk_div = 160 MHz / 20 MHz = 8        (exact, no fractional)
-    //   bclk_div = 20 MHz / 2.5 MHz = 8        (PDM minimum)
-    // With DSR_8S (÷64): PCM output ≈ 39 kHz.
+    // Derive i2s_rate from the target PCM output rate (see doc comment for full derivation):
+    //   i2s_rate = pcm_sample_rate * DSR_DIVISOR / BITS_PER_FRAME
+    //   bclk     = i2s_rate * 2 * 16             (PDM clock on WS pin)
+    //   mclk     = i2s_rate * 256
+    //   mclk_div = 160 MHz / mclk                (may be fractional)
+    //   bclk_div = mclk / bclk = 256 / 32 = 8   (PDM minimum)
+    // With DSR_8S (÷64): PCM output = bclk / 64 = pcm_sample_rate.
+    const BITS_PER_FRAME: u32 = 32; // Data16Channel16: 2 channels × 16 bits
+    const DSR_DIVISOR: u32 = 64;    // DSR_8S mode (rx_pdm_sinc_dsr_16_en = 0)
+    let i2s_sample_rate = pcm_sample_rate * DSR_DIVISOR / BITS_PER_FRAME;
+    let pdm_clock = i2s_sample_rate * BITS_PER_FRAME;
+
+    info!(
+        "Mic rates: i2s_rate={} Hz, pdm_clock={} Hz, pcm_rate={} Hz",
+        i2s_sample_rate, pdm_clock, pcm_sample_rate
+    );
+
     let i2s = I2s::new(
         mic_hardware.i2s,
         mic_hardware.dma_channel,
         Config::new_tdm_philips()
-            .with_sample_rate(Rate::from_hz(78125))
+            .with_sample_rate(Rate::from_hz(i2s_sample_rate))
             .with_data_format(DataFormat::Data16Channel16),
     )
     .expect("I2S init failed");

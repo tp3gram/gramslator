@@ -79,7 +79,7 @@ async fn main(spawner: Spawner) -> ! {
         adc1: peripherals.ADC1,
     });
 
-    elecrow_board::network::test_stream(network, &tls).await;
+    // elecrow_board::network::test_stream(network, &tls).await;
 
     // ---- Analog switch: route GPIO9/10 to microphone -------------------------
 
@@ -100,6 +100,7 @@ async fn main(spawner: Spawner) -> ! {
             din_pin: peripherals.GPIO10,
         },
         rx_descriptors,
+        16_000,
     );
 
     info!("Microphone I2S configured, starting circular DMA...");
