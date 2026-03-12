@@ -1,6 +1,7 @@
 use alloc::string::String;
 
 use crate::app_state::{self, DisplaySignal};
+use crate::elecrow_board::mic::MIC_PIPE;
 use crate::net::{self, Connection};
 use crate::translate;
 use defmt::info;
@@ -229,8 +230,8 @@ async fn handle_ws_frame(
 
 /// Raw WAV file baked into flash.  The PCM data starts at byte 44
 /// (standard WAV header).
-const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
-const WAV_HEADER_SIZE: usize = 44;
+// const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
+// const WAV_HEADER_SIZE: usize = 44;
 
 /// Persistent Embassy task that maintains a WebSocket connection to Deepgram,
 /// streams example audio, and publishes received transcripts to the shared
@@ -266,31 +267,43 @@ pub async fn deepgram_task(
         // halves, so instead we interleave: after sending each audio chunk
         // we attempt a brief non-blocking recv to drain any partial
         // transcripts Deepgram has ready.
-        let audio_data = &AUDIO_WAV[WAV_HEADER_SIZE..];
-        let chunk_size = 2048;
+
         let mask_key: u32 = 0xDEAD_BEEF; // Fixed mask key for PoC
 
-        info!(
-            "Sending {} bytes of audio ({} chunks)...",
-            audio_data.len(),
-            audio_data.len().div_ceil(chunk_size)
-        );
-
+        let mut mic_read_buf = [0u8; 4096];
         let mut recv_buf = [0u8; 4096];
         let mut done = false;
         /// How long to poll for a response between audio chunks.
         const RECV_POLL: Duration = Duration::from_millis(5);
 
-        for (i, chunk) in audio_data.chunks(chunk_size).enumerate() {
+        info!("Starting microphone streaming...");
+
+        loop {
             if done {
                 break;
+            }
+
+            let n = MIC_PIPE.read(&mut mic_read_buf[..]).await;
+            info!("Mic pipe read {} bytes", n);
+
+            // Drop duplicate channel: Data16Channel16 outputs each mono PDM
+            // sample twice (L and R slots identical). Keep every other 16-bit
+            // sample to produce true mono: [S0,S0,S1,S1,...] → [S0,S1,...]
+            let mono_len = n / 2;
+            let mut j = 0;
+            for i in (0..n).step_by(4) {
+                if i + 1 < n {
+                    mic_read_buf[j] = mic_read_buf[i];
+                    mic_read_buf[j + 1] = mic_read_buf[i + 1];
+                    j += 2;
+                }
             }
 
             if let Err(e) = edge_ws::io::send(
                 &mut conn,
                 edge_ws::FrameType::Binary(false),
                 Some(mask_key),
-                chunk,
+                &mic_read_buf[..mono_len],
             )
             .await
             {
@@ -302,10 +315,6 @@ pub async fn deepgram_task(
                 info!("Failed to flush audio chunk: {:?}", e);
                 done = true;
                 break;
-            }
-
-            if i % 10 == 0 {
-                info!("  Sent chunk {}", i);
             }
 
             // Drain any responses that arrived while we were sending.
@@ -343,11 +352,8 @@ pub async fn deepgram_task(
         while !done && embassy_time::Instant::now() < deadline {
             let remaining = deadline - embassy_time::Instant::now();
 
-            match embassy_time::with_timeout(
-                remaining,
-                edge_ws::io::recv(&mut conn, &mut recv_buf),
-            )
-            .await
+            match embassy_time::with_timeout(remaining, edge_ws::io::recv(&mut conn, &mut recv_buf))
+                .await
             {
                 Err(_timeout) => {
                     info!("5-second window elapsed.");

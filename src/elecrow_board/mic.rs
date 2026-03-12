@@ -155,7 +155,7 @@ pub fn read_mic_dma_loop_blocking(
             Ok(0) => {} // nothing ready yet
             Ok(_) => {
                 let read = transfer.pop(&mut buf).expect("pop failed");
-                info!("DMA read: {}", read);
+                // info!("DMA read: {}", read);
 
                 // Non-blocking write into the pipe; drops data if the pipe is full.
                 let _ = MIC_PIPE.try_write(&buf[..read]).map_err(|e| {
