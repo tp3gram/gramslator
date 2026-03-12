@@ -1,8 +1,16 @@
 [target.xtensa-esp32s3-none-elf]
-runner = "espflash flash --monitor --chip esp32s3 --log-format defmt --flash-size 16mb --partition-table partitions.csv"
+runner = [
+  "espflash", "flash", "--monitor",
+  "--chip", "esp32s3",
+  "--log-format", "defmt",
+  "--flash-size", "16mb",
+  "--partition-table", "partitions.csv",
+  "-F", "{t} {L} {s}",
+]
 
 [env]
 DEFMT_LOG = "info"
+ESP_HAL_CONFIG_PSRAM_MODE = "octal"
 
 [build]
 rustflags = [

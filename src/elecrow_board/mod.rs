@@ -8,3 +8,4 @@ pub mod buzzer;
 pub mod display;
 pub mod mic;
 pub mod mic_wireless_module_switch;
+pub mod network;

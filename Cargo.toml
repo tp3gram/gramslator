@@ -9,7 +9,7 @@ name = "test-project"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.0", features = ["defmt", "esp32s3", "unstable"] }
+esp-hal = { version = "~1.0", features = ["defmt", "esp32s3", "unstable", "psram"] }
 esp32s3 = "0.34.0"
 libm = "0.2"
 
@@ -34,7 +34,7 @@ embassy-net = { version = "0.8", features = [
 ] }
 embedded-io = "0.7"
 embedded-io-async = "0.7"
-esp-alloc = "0.9.0"
+esp-alloc = { version = "0.9.0", features = ["nightly"] }
 esp-backtrace = { version = "0.18.1", features = [
   "esp32s3",
   "panic-handler",
@@ -81,6 +81,7 @@ mbedtls-rs = { git = "https://github.com/esp-rs/mbedtls-rs", features = [
   "defmt",
 ] }
 tinyrlibc = { version = "0.5", default-features = false, features = ["memchr"] }
+konst = "0.3.16"
 
 
 [profile.dev]
