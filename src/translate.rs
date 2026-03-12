@@ -17,8 +17,7 @@ use defmt::{error, info};
 use embedded_io_async::{Read, Write};
 
 /// Cached last translation: `(input_text, translated_text)`.
-static LAST_TRANSLATION: Mutex<RefCell<Option<(String, String)>>> =
-    Mutex::new(RefCell::new(None));
+static LAST_TRANSLATION: Mutex<RefCell<Option<(String, String)>>> = Mutex::new(RefCell::new(None));
 
 const GOOGLE_API_KEY: &str = env!("GOOGLE_API_KEY");
 
@@ -159,9 +158,7 @@ where
         TranslateError::ResponseReadFailed
     })?;
 
-    let status_line_end = resp_str[..header_end]
-        .find("\r\n")
-        .unwrap_or(header_end);
+    let status_line_end = resp_str[..header_end].find("\r\n").unwrap_or(header_end);
     let status_line = &resp_str[..status_line_end];
     info!("HTTP response: {}", status_line);
 
