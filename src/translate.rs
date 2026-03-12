@@ -14,7 +14,13 @@ use core::fmt::Write as _;
 
 use critical_section::Mutex;
 use defmt::{error, info};
+use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::{Channel, Receiver, Sender};
 use embedded_io_async::{Read, Write};
+use mbedtls_rs::Tls;
+
+use crate::net::Connection;
 
 /// Cached last translation: `(input_text, translated_text)`.
 static LAST_TRANSLATION: Mutex<RefCell<Option<(String, String)>>> = Mutex::new(RefCell::new(None));
@@ -262,6 +268,83 @@ where
         Err(e) => {
             info!("Translation failed: {:?}", e);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Translation task (channel-driven background worker)
+// ---------------------------------------------------------------------------
+
+/// Depth of the translation channel.  The idle-timeout debounce logic means
+/// at most one or two transcripts are in flight at a time; a depth of 2 gives
+/// headroom without wasting RAM.
+pub const TRANSLATE_CHANNEL_DEPTH: usize = 2;
+
+/// Concrete channel type used for translation requests.
+pub type TranslateChannel = Channel<CriticalSectionRawMutex, String, TRANSLATE_CHANNEL_DEPTH>;
+
+/// The sender half passed to streaming functions so they can enqueue
+/// transcript JSON for translation.
+pub type TranslateSender =
+    Sender<'static, CriticalSectionRawMutex, String, TRANSLATE_CHANNEL_DEPTH>;
+
+/// Create the translation channel and spawn the background translation task.
+///
+/// Returns the [`Sender`] half that streaming code should use to enqueue
+/// transcript JSON for translation.
+pub fn spawn_translation_task(
+    channel: &'static TranslateChannel,
+    spawner: &Spawner,
+    network: embassy_net::Stack<'static>,
+    tls: &'static Tls<'static>,
+) -> TranslateSender {
+    let tx = channel.sender();
+    let rx = channel.receiver();
+
+    spawner
+        .spawn(translation_task(rx, network, tls))
+        .expect("Failed to spawn translation task");
+
+    tx
+}
+
+/// Background task that pulls Deepgram JSON off a channel, extracts the
+/// transcript, translates it (en -> es) via Google Translate, and caches
+/// the result.  Skips the TLS round-trip on cache hits.
+#[embassy_executor::task]
+async fn translation_task(
+    rx: Receiver<'static, CriticalSectionRawMutex, String, TRANSLATE_CHANNEL_DEPTH>,
+    stack: embassy_net::Stack<'static>,
+    tls: &'static Tls<'static>,
+) {
+    loop {
+        let json = rx.receive().await;
+
+        let Some(transcript) = extract_transcript(&json) else {
+            info!("No transcript field found in response");
+            continue;
+        };
+
+        // Check cache — skip the network round-trip on hit.
+        if let Some(result) = check_translation_cache(transcript) {
+            info!("Translation cache hit: \"{}\"", result.as_str());
+            continue;
+        }
+
+        let mut conn =
+            match Connection::init_tls(stack, env!("GOOGLE_TRANSLATE_HOST"), 443, tls).await {
+                Ok(c) => c,
+                Err(e) => {
+                    info!("Failed to connect to Google Translate: {:?}", e);
+                    continue;
+                }
+            };
+
+        translate_response(&mut conn, transcript).await;
+
+        // Close the connection cleanly so that PSA crypto resources are
+        // released before the Session is dropped.
+        conn.close().await;
     }
 }
 

@@ -55,11 +55,8 @@ async fn wifi_connect_task(
             MAX_WIFI_RETRIES
         );
 
-        let connect_result = embassy_time::with_timeout(
-            WIFI_CONNECT_TIMEOUT,
-            wifi_controller.connect_async(),
-        )
-        .await;
+        let connect_result =
+            embassy_time::with_timeout(WIFI_CONNECT_TIMEOUT, wifi_controller.connect_async()).await;
 
         match connect_result {
             Ok(Ok(())) => {
@@ -159,7 +156,11 @@ pub fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::Stack<
     stack
 }
 
-pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static>) {
+pub async fn test_stream(
+    network: embassy_net::Stack<'static>,
+    tls: &'static Tls<'static>,
+    tx: translate::TranslateSender,
+) {
     /// Raw WAV file baked into flash. The PCM data starts at byte 44 (standard WAV header).
     const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
     const WAV_HEADER_SIZE: usize = 44;
@@ -271,10 +272,12 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
         {
             Err(_timeout) => {
                 // No frame arrived before the timeout.
-                // If we have a pending transcript, translate it now.
+                // If we have a pending transcript, queue it for translation.
                 if let Some(json) = pending_json.take() {
-                    info!("Idle timeout — translating buffered transcript");
-                    translate_response(network, tls, &json).await;
+                    info!("Idle timeout — queuing buffered transcript for translation");
+                    if tx.try_send(json).is_err() {
+                        info!("Translation channel full, dropping transcript");
+                    }
                 }
 
                 // If the overall deadline has also elapsed, break out.
@@ -321,10 +324,10 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
         }
     }
 
-    // Translate any remaining buffered transcript before closing.
+    // Queue any remaining buffered transcript before closing.
     if let Some(json) = pending_json.take() {
-        info!("Translating final buffered transcript before close");
-        translate_response(network, tls, &json).await;
+        info!("Queuing final buffered transcript before close");
+        tx.send(json).await;
     }
 
     // Signal end of audio stream
@@ -343,35 +346,4 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
     }
 
     info!("Done! Deepgram streaming complete.");
-}
-
-/// Extract a Deepgram transcript from `json`, translate it (en -> es) via
-/// Google Translate, and cache the result. Skips the TLS round-trip on cache
-/// hits.
-async fn translate_response(stack: embassy_net::Stack<'static>, tls: &Tls<'_>, json: &str) {
-    let Some(transcript) = translate::extract_transcript(json) else {
-        info!("No transcript field found in response");
-        return;
-    };
-
-    // Check cache — return early on hit.
-    if let Some(result) = translate::check_translation_cache(transcript) {
-        info!("Translation cache hit: \"{}\"", result.as_str());
-        return;
-    }
-
-    let mut conn = match Connection::init_tls(stack, env!("GOOGLE_TRANSLATE_HOST"), 443, tls).await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            info!("Failed to connect to Google Translate: {:?}", e);
-            return;
-        }
-    };
-
-    translate::translate_response(&mut conn, transcript).await;
-
-    // Close the connection cleanly so that PSA crypto resources are released
-    // before the Session is dropped.
-    conn.close().await;
 }

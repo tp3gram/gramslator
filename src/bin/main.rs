@@ -18,6 +18,7 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use gramslator::elecrow_board;
 use gramslator::net;
+use static_cell::StaticCell;
 use tinyrlibc as _;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -75,7 +76,7 @@ async fn main(spawner: Spawner) -> ! {
         esp_alloc::HEAP.used()
     );
 
-    /* // ---- WiFi -----------------------------------------------------------------
+    // ---- WiFi -----------------------------------------------------------------
 
     let network = elecrow_board::network::init(
         elecrow_board::network::NetworkHardware {
@@ -86,13 +87,24 @@ async fn main(spawner: Spawner) -> ! {
 
     // ---- TLS initialization ---------------------------------------------------
 
-    // True Random Number Generator + mbedTLS singleton
-    let tls = net::init_tls(net::TlsHardware {
+    // True Random Number Generator + mbedTLS singleton.
+    // Stored in a StaticCell so the spawned translation task can hold a
+    // `&'static Tls<'static>` reference.
+    static TLS: StaticCell<mbedtls_rs::Tls<'static>> = StaticCell::new();
+    let tls: &'static mbedtls_rs::Tls<'static> = TLS.init(net::init_tls(net::TlsHardware {
         rng: peripherals.RNG,
         adc1: peripherals.ADC1,
-    });
+    }));
 
-    elecrow_board::network::test_stream(network, &tls).await; */
+    // ---- Translation task -------------------------------------------------------
+
+    static TRANSLATE_CHANNEL: StaticCell<gramslator::translate::TranslateChannel> =
+        StaticCell::new();
+    let channel = TRANSLATE_CHANNEL.init(gramslator::translate::TranslateChannel::new());
+    let translate_tx =
+        gramslator::translate::spawn_translation_task(channel, &spawner, network, tls);
+
+    elecrow_board::network::test_stream(network, tls, translate_tx).await;
 
     // ---- Display (SPI + async DMA) ---------------------------------------------
     let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =

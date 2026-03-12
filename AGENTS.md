@@ -99,7 +99,8 @@ info!("Embassy initialized!");
 
 ### Formatting
 
-Use `cargo fmt` (rustfmt defaults).
+Use `cargo fmt` (rustfmt defaults) before running `cargo check` or `cargo
+build`.
 
 ### Dependencies
 
