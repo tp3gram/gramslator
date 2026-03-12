@@ -251,7 +251,14 @@ pub async fn deepgram_task(
 
     loop {
         // ---- Connect to Deepgram ----------------------------------------
-        let mut conn = net::deepgram_create_listen_socket(network, tls).await;
+        let mut conn = match net::deepgram_create_listen_socket(network, tls).await {
+            Ok(c) => c,
+            Err(e) => {
+                info!("Deepgram connect failed: {:?}, retrying...", e);
+                Timer::after(RECONNECT_DELAY).await;
+                continue;
+            }
+        };
 
         // ---- Stream audio & read responses (interleaved) ----------------
         //

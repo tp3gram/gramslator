@@ -229,8 +229,8 @@ impl<'a> Connection<'a> {
                 }
                 Err(e) => {
                     info!(
-                        "TCP connect attempt {}/{} failed: {:?}",
-                        attempt, MAX_TCP_RETRIES, e
+                        "TCP connect to {}:{} attempt {}/{} failed: {:?}",
+                        remote_ip, port, attempt, MAX_TCP_RETRIES, e
                     );
                     last_err = Some(e);
                 }
@@ -382,7 +382,7 @@ pub fn find_header_end(buf: &[u8]) -> Option<usize> {
 async fn deepgram_tcp_connect<'a>(
     network: embassy_net::Stack<'static>,
     tls: &'a Tls<'static>,
-) -> Connection<'a> {
+) -> Result<Connection<'a>, ConnectionError> {
     // DEEPGRAM_USE_TLS: "false" disables TLS (HTTP), defaults to "true" (HTTPS).
     // DEEPGRAM_PORT:    override the port, defaults to 443.
     const DEEPGRAM_USE_TLS: bool = konst::result::unwrap_ctx!(konst::primitive::parse_bool(
@@ -406,15 +406,12 @@ async fn deepgram_tcp_connect<'a>(
         );
         Connection::open_tcp_connection_with_tls(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT, tls)
             .await
-            .expect("Failed to establish TLS connection")
     } else {
         info!(
             "Connecting to Deepgram over HTTP (port {})...",
             DEEPGRAM_PORT
         );
-        Connection::open_tcp_connection(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT)
-            .await
-            .expect("Failed to establish TCP connection")
+        Connection::open_tcp_connection(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT).await
     }
 }
 
@@ -477,13 +474,13 @@ where
 pub async fn deepgram_create_listen_socket<'a>(
     network: embassy_net::Stack<'static>,
     tls: &'a Tls<'static>,
-) -> Connection<'a> {
+) -> Result<Connection<'a>, ConnectionError> {
     // Wait for WiFi + DHCP before attempting any network I/O.
     network.wait_config_up().await;
 
-    let mut conn: Connection<'_> = deepgram_tcp_connect(network, tls).await;
+    let mut conn: Connection<'_> = deepgram_tcp_connect(network, tls).await?;
 
     deepgram_listen_socket_upgrade(&mut conn).await;
 
-    conn
+    Ok(conn)
 }
