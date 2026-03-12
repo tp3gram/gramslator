@@ -9,7 +9,7 @@ name = "test-project"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.0", features = ["defmt", "esp32s3", "unstable"] }
+esp-hal = { version = "~1.0", features = ["defmt", "esp32s3", "unstable", "psram"] }
 
 esp-rtos = { version = "0.2.0", features = [
   "embassy",
@@ -32,7 +32,7 @@ embassy-net = { version = "0.8", features = [
 ] }
 embedded-io = "0.7"
 embedded-io-async = "0.7"
-esp-alloc = "0.9.0"
+esp-alloc = { version = "0.9.0", features = ["nightly"] }
 esp-backtrace = { version = "0.18.1", features = [
   "esp32s3",
   "panic-handler",

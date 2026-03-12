@@ -132,9 +132,13 @@ impl<'a> TlsConnection<'a> {
         clippy::large_stack_frames,
         reason = "zero-init arrays are optimized to memset by the compiler"
     )]
-    fn claim_buffers(
-    ) -> Result<(&'static mut [u8; TCP_RX_SIZE], &'static mut [u8; TCP_TX_SIZE]), ConnectionError>
-    {
+    fn claim_buffers() -> Result<
+        (
+            &'static mut [u8; TCP_RX_SIZE],
+            &'static mut [u8; TCP_TX_SIZE],
+        ),
+        ConnectionError,
+    > {
         for i in 0..MAX_CONNECTIONS {
             if let Some(rx) = RX_BUFS[i].try_init([0; TCP_RX_SIZE]) {
                 let tx = TX_BUFS[i]
@@ -256,7 +260,10 @@ pub async fn resolve(
     host: &str,
 ) -> Result<IpAddress, ConnectionError> {
     info!("Resolving {}...", host);
-    let ip_addrs = network.dns_query(host, DnsQueryType::A).await.map_err(ConnectionError::DnsResolution)?;
+    let ip_addrs = network
+        .dns_query(host, DnsQueryType::A)
+        .await
+        .map_err(ConnectionError::DnsResolution)?;
     let ip = ip_addrs[0];
     info!("Resolved {} → {}", host, ip);
     Ok(ip)
@@ -359,10 +366,9 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
 
     // ---- TLS connection -------------------------------------------------------
 
-    let mut conn =
-        TlsConnection::init(network, env!("DEEPGRAM_HOST"), 443, &tls)
-            .await
-            .expect("Failed to establish TLS connection");
+    let mut conn = TlsConnection::init(network, env!("DEEPGRAM_HOST"), 443, &tls)
+        .await
+        .expect("Failed to establish TLS connection");
 
     // ---- WebSocket upgrade ----------------------------------------------------
 
@@ -428,11 +434,8 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
             remaining
         };
 
-        match embassy_time::with_timeout(
-            timeout,
-            edge_ws::io::recv(&mut *conn, &mut recv_buf),
-        )
-        .await
+        match embassy_time::with_timeout(timeout, edge_ws::io::recv(&mut *conn, &mut recv_buf))
+            .await
         {
             Err(_timeout) => {
                 // No frame arrived before the timeout.
@@ -513,11 +516,7 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
 /// Extract a Deepgram transcript from `json`, translate it (en -> es) via
 /// Google Translate, and cache the result. Skips the TLS round-trip on cache
 /// hits.
-async fn translate_response(
-    stack: embassy_net::Stack<'static>,
-    tls: &Tls<'_>,
-    json: &str,
-) {
+async fn translate_response(stack: embassy_net::Stack<'static>, tls: &Tls<'_>, json: &str) {
     let Some(transcript) = translate::extract_transcript(json) else {
         info!("No transcript field found in response");
         return;
@@ -529,14 +528,7 @@ async fn translate_response(
         return;
     }
 
-    let mut conn = match TlsConnection::init(
-        stack,
-        "translation.googleapis.com",
-        443,
-        tls,
-    )
-    .await
-    {
+    let mut conn = match TlsConnection::init(stack, "translation.googleapis.com", 443, tls).await {
         Ok(c) => c,
         Err(e) => {
             info!("Failed to connect to Google Translate: {:?}", e);
