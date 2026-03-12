@@ -55,11 +55,8 @@ async fn wifi_connect_task(
             MAX_WIFI_RETRIES
         );
 
-        let connect_result = embassy_time::with_timeout(
-            WIFI_CONNECT_TIMEOUT,
-            wifi_controller.connect_async(),
-        )
-        .await;
+        let connect_result =
+            embassy_time::with_timeout(WIFI_CONNECT_TIMEOUT, wifi_controller.connect_async()).await;
 
         match connect_result {
             Ok(Ok(())) => {
@@ -159,7 +156,56 @@ pub fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::Stack<
     stack
 }
 
-pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static>) {
+/// Process a single incoming WebSocket frame.
+///
+/// Returns `true` when the connection should be considered closed (server sent
+/// a Close frame or an unrecoverable condition was encountered).
+async fn handle_ws_frame(
+    frame_type: edge_ws::FrameType,
+    payload: &[u8],
+    conn: &mut Connection<'_>,
+    mask_key: u32,
+    signal: &translate::TranslateSignal,
+) -> bool {
+    match frame_type {
+        edge_ws::FrameType::Text(_) => {
+            let json = core::str::from_utf8(payload).unwrap_or("<invalid UTF-8>");
+            info!("Received: {}", json);
+            signal.signal(translate::TranscriptMessage::DgJson(String::from(json)));
+            false
+        }
+        edge_ws::FrameType::Binary(_) => {
+            info!("Received binary frame ({} bytes)", payload.len());
+            false
+        }
+        edge_ws::FrameType::Close => {
+            info!("WebSocket closed by server.");
+            true
+        }
+        edge_ws::FrameType::Ping => {
+            info!("Ping received, sending pong");
+            let _ = edge_ws::io::send(
+                &mut *conn,
+                edge_ws::FrameType::Pong,
+                Some(mask_key),
+                payload,
+            )
+            .await;
+            let _ = conn.flush().await;
+            false
+        }
+        other => {
+            info!("Received {:?} frame ({} bytes)", other, payload.len());
+            false
+        }
+    }
+}
+
+pub async fn test_stream(
+    network: embassy_net::Stack<'static>,
+    tls: &'static Tls<'static>,
+    signal: &'static translate::TranslateSignal,
+) {
     /// Raw WAV file baked into flash. The PCM data starts at byte 44 (standard WAV header).
     const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
     const WAV_HEADER_SIZE: usize = 44;
@@ -207,7 +253,13 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
 
     net::websocket_upgrade(&mut conn).await;
 
-    // ---- Stream audio ---------------------------------------------------------
+    // ---- Stream audio & read responses (interleaved) -------------------------
+    //
+    // We cannot split the TLS connection into independent read/write halves, so
+    // instead we interleave: after sending each audio chunk we attempt a brief
+    // non-blocking recv to drain any partial transcripts Deepgram has ready.
+    // This lets us forward results to the translation task while still streaming
+    // audio rather than waiting until all audio is sent.
 
     let audio_data = &AUDIO_WAV[WAV_HEADER_SIZE..];
     let chunk_size = 2048;
@@ -218,6 +270,11 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
         audio_data.len(),
         audio_data.len().div_ceil(chunk_size)
     );
+
+    let mut recv_buf = [0u8; 4096];
+    let mut done = false;
+    /// How long to poll for a response between audio chunks.
+    const RECV_POLL: Duration = Duration::from_millis(5);
 
     for (i, chunk) in audio_data.chunks(chunk_size).enumerate() {
         edge_ws::io::send(
@@ -233,87 +290,49 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
         if i % 10 == 0 {
             info!("  Sent chunk {}", i);
         }
-    }
-    info!("Audio sent! Keeping connection open for 10 seconds...");
 
-    // ---- Read responses for 10 seconds ----------------------------------------
-    //
-    // Deepgram sends many partial transcript frames in rapid succession.
-    // Rather than translating every frame, we buffer the latest transcript
-    // JSON and only translate once Deepgram goes idle for
-    // `TRANSLATE_IDLE_TIMEOUT`. This "trailing edge" approach ensures:
-    //   - We never flood Google Translate with redundant partial requests.
-    //   - The most recent transcript is always translated once speech pauses.
-
-    /// How long to wait without receiving a new text frame before translating
-    /// the most recently buffered transcript.
-    const TRANSLATE_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
-
-    let deadline = embassy_time::Instant::now() + Duration::from_secs(10);
-    let mut recv_buf = [0u8; 4096];
-    let mut done = false;
-
-    // Buffer for the most recent transcript JSON awaiting translation.
-    // When the idle timer fires we translate this and clear it.
-    let mut pending_json: Option<String> = None;
-
-    while !done && embassy_time::Instant::now() < deadline {
-        // Pick the shorter of the two timeouts: overall deadline, or idle
-        // timer (if we have a buffered transcript waiting for a lull).
-        let remaining = deadline - embassy_time::Instant::now();
-        let timeout = if pending_json.is_some() {
-            remaining.min(TRANSLATE_IDLE_TIMEOUT)
-        } else {
-            remaining
-        };
-
-        match embassy_time::with_timeout(timeout, edge_ws::io::recv(&mut conn, &mut recv_buf)).await
-        {
-            Err(_timeout) => {
-                // No frame arrived before the timeout.
-                // If we have a pending transcript, translate it now.
-                if let Some(json) = pending_json.take() {
-                    info!("Idle timeout — translating buffered transcript");
-                    translate_response(network, tls, &json).await;
+        // Drain any responses that arrived while we were sending.
+        while !done {
+            match embassy_time::with_timeout(RECV_POLL, edge_ws::io::recv(&mut conn, &mut recv_buf))
+                .await
+            {
+                Err(_timeout) => break, // nothing ready right now — send next chunk
+                Ok(Ok((frame_type, len))) => {
+                    done =
+                        handle_ws_frame(frame_type, &recv_buf[..len], &mut conn, mask_key, signal)
+                            .await;
                 }
-
-                // If the overall deadline has also elapsed, break out.
-                if embassy_time::Instant::now() >= deadline {
-                    info!("10-second window elapsed.");
-                    break;
-                }
-            }
-            Ok(Ok((frame_type, len))) => match frame_type {
-                edge_ws::FrameType::Text(_) => {
-                    let json = core::str::from_utf8(&recv_buf[..len]).unwrap_or("<invalid UTF-8>");
-                    info!("Received: {}", json);
-                    // Buffer the latest transcript; it overwrites any previous
-                    // pending frame so only the most recent partial gets
-                    // translated once Deepgram goes idle.
-                    pending_json = Some(String::from(json));
-                }
-                edge_ws::FrameType::Binary(_) => {
-                    info!("Received binary frame ({} bytes)", len);
-                }
-                edge_ws::FrameType::Close => {
-                    info!("WebSocket closed by server.");
+                Ok(Err(e)) => {
+                    info!("WebSocket recv error: {:?}", e);
                     done = true;
                 }
-                edge_ws::FrameType::Ping => {
-                    info!("Ping received, sending pong");
-                    let _ = edge_ws::io::send(
-                        &mut conn,
-                        edge_ws::FrameType::Pong,
-                        Some(mask_key),
-                        &recv_buf[..len],
-                    )
+            }
+        }
+    }
+    info!("Audio sent! Keeping connection open for 5 seconds...");
+
+    // ---- Read remaining responses for up to 5 seconds -------------------------
+    //
+    // Every text frame is forwarded to the translation task immediately via
+    // a Signal.  The translation task handles idle-timeout debouncing so
+    // that rapid partial transcripts don't flood Google Translate.
+
+    let deadline = embassy_time::Instant::now() + Duration::from_secs(5);
+
+    while !done && embassy_time::Instant::now() < deadline {
+        let remaining = deadline - embassy_time::Instant::now();
+
+        match embassy_time::with_timeout(remaining, edge_ws::io::recv(&mut conn, &mut recv_buf))
+            .await
+        {
+            Err(_timeout) => {
+                info!("5-second window elapsed.");
+                break;
+            }
+            Ok(Ok((frame_type, len))) => {
+                done = handle_ws_frame(frame_type, &recv_buf[..len], &mut conn, mask_key, signal)
                     .await;
-                    let _ = conn.flush().await;
-                }
-                other => {
-                    info!("Received {:?} frame ({} bytes)", other, len);
-                }
-            },
+            }
             Ok(Err(e)) => {
                 info!("WebSocket recv error: {:?}", e);
                 done = true;
@@ -321,11 +340,8 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
         }
     }
 
-    // Translate any remaining buffered transcript before closing.
-    if let Some(json) = pending_json.take() {
-        info!("Translating final buffered transcript before close");
-        translate_response(network, tls, &json).await;
-    }
+    // Tell the translation task to flush immediately — no more frames coming.
+    signal.signal(translate::TranscriptMessage::Flush);
 
     // Signal end of audio stream
     if !done {
@@ -343,35 +359,4 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
     }
 
     info!("Done! Deepgram streaming complete.");
-}
-
-/// Extract a Deepgram transcript from `json`, translate it (en -> es) via
-/// Google Translate, and cache the result. Skips the TLS round-trip on cache
-/// hits.
-async fn translate_response(stack: embassy_net::Stack<'static>, tls: &Tls<'_>, json: &str) {
-    let Some(transcript) = translate::extract_transcript(json) else {
-        info!("No transcript field found in response");
-        return;
-    };
-
-    // Check cache — return early on hit.
-    if let Some(result) = translate::check_translation_cache(transcript) {
-        info!("Translation cache hit: \"{}\"", result.as_str());
-        return;
-    }
-
-    let mut conn = match Connection::init_tls(stack, env!("GOOGLE_TRANSLATE_HOST"), 443, tls).await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            info!("Failed to connect to Google Translate: {:?}", e);
-            return;
-        }
-    };
-
-    translate::translate_response(&mut conn, transcript).await;
-
-    // Close the connection cleanly so that PSA crypto resources are released
-    // before the Session is dropped.
-    conn.close().await;
 }
