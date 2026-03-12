@@ -90,9 +90,9 @@ async fn main(spawner: Spawner) -> ! {
 
     // ---- Microphone (I2S RX) -------------------------------------------------
 
-    let (mut rx_buffer, rx_descriptors, _, _) = dma_circular_buffers!(32000, 0);
+    let (rx_buffer, rx_descriptors, _, _) = dma_circular_buffers!(32000, 0);
 
-    let mut i2s_rx = elecrow_board::mic::init(
+    let i2s_rx = elecrow_board::mic::init(
         elecrow_board::mic::MicHardware {
             i2s: peripherals.I2S0,
             dma_channel: peripherals.DMA_CH0,
@@ -103,73 +103,13 @@ async fn main(spawner: Spawner) -> ! {
         16_000,
     );
 
-    info!("Microphone I2S configured, starting circular DMA...");
+    info!("Microphone I2S configured, spawning read task...");
 
-    let mut transfer = i2s_rx
-        .read_dma_circular(&mut rx_buffer)
-        .expect("Failed to start I2S circular DMA read");
-
-    // Heap-allocated pop buffer — must be >= max available() to satisfy pop() API
-    let mut buf = alloc::vec![0u8; 32000];
-
-    // Rolling RMS over the last ~100 ms of audio.
-    // At ~39 kHz mono 16-bit: 100 ms ≈ 3906 samples.
-    const RMS_WINDOW_SAMPLES: usize = 3906;
-    let mut ring = alloc::vec![0i16; RMS_WINDOW_SAMPLES];
-    let mut ring_pos: usize = 0;
-    let mut sum_sq: u64 = 0; // running sum of squares over the window
+    spawner
+        .spawn(elecrow_board::mic::read_task(i2s_rx, rx_buffer))
+        .expect("Failed to spawn mic read task");
 
     loop {
-        match transfer.available() {
-            Err(e) => {
-                info!("DMA error: {}", e);
-                break;
-            }
-            Ok(0) => {} // nothing ready yet
-            Ok(_) => {
-                let read = transfer.pop(&mut buf).expect("pop failed");
-
-                // Feed samples into the rolling window and update sum_sq
-                for sample_bytes in buf[..read].chunks_exact(2) {
-                    let sample = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
-
-                    // Remove oldest sample's contribution
-                    let old = ring[ring_pos] as i64;
-                    sum_sq -= (old * old) as u64;
-
-                    // Insert new sample
-                    ring[ring_pos] = sample;
-                    let new = sample as i64;
-                    sum_sq += (new * new) as u64;
-
-                    ring_pos = (ring_pos + 1) % RMS_WINDOW_SAMPLES;
-                }
-
-                let mean_sq = sum_sq / RMS_WINDOW_SAMPLES as u64;
-
-                // dBFS = 20 * log10(rms / 32767) = 10 * log10(mean_sq / 32767^2)
-                let dbfs = if mean_sq == 0 {
-                    -96.0_f32
-                } else {
-                    let mean_sq_f = mean_sq as f32;
-                    // 32767^2 = 1_073_676_289
-                    10.0 * libm::log10f(mean_sq_f / 1_073_676_289.0)
-                };
-
-                // RMS for reference
-                let rms = libm::sqrtf(mean_sq as f32) as u32;
-
-                // Log dBFS as fixed-point tenths to avoid defmt float formatting
-                let dbfs_int = dbfs as i32;
-                let dbfs_frac = (libm::fabsf(dbfs * 10.0) as u32) % 10;
-                info!(
-                    "Mic: read={},\trms={},\tdBFS={}.{}",
-                    read, rms, dbfs_int, dbfs_frac
-                );
-            }
-        }
+        embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
     }
-
-    info!("DMA loop exited, halting.");
-    loop {}
 }
