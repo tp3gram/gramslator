@@ -15,6 +15,7 @@ use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use gramslator::elecrow_board;
+use gramslator::net;
 use tinyrlibc as _;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -74,7 +75,7 @@ async fn main(spawner: Spawner) -> ! {
     // ---- TLS initialization ---------------------------------------------------
 
     // True Random Number Generator + mbedTLS singleton
-    let tls = elecrow_board::network::init_tls(elecrow_board::network::TlsHardware {
+    let tls = net::init_tls(net::TlsHardware {
         rng: peripherals.RNG,
         adc1: peripherals.ADC1,
     });
