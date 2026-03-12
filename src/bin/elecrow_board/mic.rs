@@ -18,9 +18,9 @@ pub struct MicHardware<'a> {
 /// esp-hal 1.0 only supports TDM mode, so we initialize I2S in TDM mode to get DMA and clocks
 /// working, then patch the I2S0 registers to switch to PDM RX with hardware PDM→PCM conversion.
 ///
-/// The clock trick: setting `sample_rate=32kHz` with `Data16Channel16` stereo produces
-/// `bclk = 32000 × 2 × 16 = 1.024 MHz` and `bclk_div = 8`, which is exactly what PDM needs
-/// for 16 kHz PCM output with DSR_8S (÷64 down-sampling).
+/// The clock trick: setting `sample_rate=78125` with `Data16Channel16` stereo produces
+/// `bclk = 78125 × 2 × 16 = 2.5 MHz` and `bclk_div = 8`, giving the mic its required
+/// ~2.5 MHz PDM clock. With DSR_8S (÷64), the PCM output rate is ~39 kHz.
 ///
 /// Closest datasheet for `LMD3526B261-OFA03`: <https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8604442987128901632>
 /// Datasheet provided by ELECROW: <https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320/blob/master/Datasheet/INMP441-Datasheet.pdf>
@@ -34,16 +34,17 @@ pub fn init<'d>(
     dma_rx_descriptors: &'static mut [DmaDescriptor],
 ) -> I2sRx<'d, Blocking> {
     // Step 1: Init I2S in TDM mode via esp-hal.
-    // sample_rate=32kHz tricks esp-hal into generating the correct PDM clocks:
-    //   bclk = 32000 * 2 * 16 = 1,024,000 Hz
-    //   mclk = 32000 * 256    = 8,192,000 Hz
-    //   bclk_div = 8 (PDM minimum)
-    // This yields a 16 kHz PCM output when PDM DSR_8S (÷64) is enabled.
+    // sample_rate=78125 tricks esp-hal into generating a 2.5 MHz PDM clock:
+    //   bclk = 78125 * 2 * 16 = 2,500,000 Hz  (PDM clock on WS pin)
+    //   mclk = 78125 * 256    = 20,000,000 Hz
+    //   mclk_div = 160 MHz / 20 MHz = 8        (exact, no fractional)
+    //   bclk_div = 20 MHz / 2.5 MHz = 8        (PDM minimum)
+    // With DSR_8S (÷64): PCM output ≈ 39 kHz.
     let i2s = I2s::new(
         mic_hardware.i2s,
         mic_hardware.dma_channel,
         Config::new_tdm_philips()
-            .with_sample_rate(Rate::from_khz(32))
+            .with_sample_rate(Rate::from_hz(78125))
             .with_data_format(DataFormat::Data16Channel16),
     )
     .expect("I2S init failed");
