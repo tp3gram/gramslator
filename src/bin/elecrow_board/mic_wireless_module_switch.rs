@@ -6,7 +6,7 @@ use esp_hal::peripherals::GPIO45;
 /// Controls the analog switch (U8/SGM3799).
 ///
 /// The mic and wireless module is wired through an analog switch (U8) controlled by the [`MicWirelessModuleSwitchHardware`].
-/// Setting GPIO45 LOW routes GPIO9 (BCLK) and GPIO10 (DIN) to the microphone.
+/// Setting GPIO45 HIGH routes GPIO9 and GPIO10 to the microphone (matches ELECROW factory firmware).
 pub struct MicWirelessModuleSwitchHardware<'a> {
     switch_output: Output<'a>,
 }
@@ -28,8 +28,8 @@ impl<'a> MicWirelessModuleSwitchHardware<'a> {
 
     pub fn set_state(&mut self, state: SwitchState) {
         match state {
-            SwitchState::Mic => self.switch_output.set_low(),
-            SwitchState::WirelessModule => self.switch_output.set_high(),
+            SwitchState::Mic => self.switch_output.set_high(),
+            SwitchState::WirelessModule => self.switch_output.set_low(),
         }
     }
 }
