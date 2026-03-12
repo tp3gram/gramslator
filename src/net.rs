@@ -1,5 +1,3 @@
-use core::ops::{Deref, DerefMut};
-
 use alloc::boxed::Box;
 use alloc::ffi::CString;
 
@@ -46,27 +44,85 @@ pub enum ConnectionError {
     TlsHandshake(SessionError),
 }
 
-// ---- TLS connection wrapper ------------------------------------------------
+// ---- Connection wrapper ----------------------------------------------------
 
-/// A fully established TLS connection backed by a pooled TCP socket.
-///
-/// The `session` field is public so callers can use it directly with
-/// `embedded_io_async::Read`/`Write` or `edge_ws::io::send`/`recv`.
-pub struct TlsConnection<'a> {
-    pub session: Session<'a, TcpSocket<'static>>,
+/// The underlying transport: either an encrypted TLS session or a plain TCP socket.
+enum ConnectionInner<'a> {
+    Tls(Session<'a, TcpSocket<'static>>),
+    Tcp(TcpSocket<'static>),
 }
 
-impl<'a> TlsConnection<'a> {
+/// A fully established connection backed by a pooled TCP socket.
+///
+/// May be either an encrypted TLS session (HTTPS) or a plain TCP connection
+/// (HTTP). Implements `embedded_io_async::Read` and `Write` so callers can
+/// use it generically regardless of the transport.
+pub struct Connection<'a> {
+    inner: ConnectionInner<'a>,
+}
+
+impl<'a> Connection<'a> {
     /// Resolve `host`, claim a free buffer pair, open a TCP connection
     /// (with retries), create a TLS session, and perform the handshake.
-    pub async fn init(
+    pub async fn init_tls(
         network: embassy_net::Stack<'static>,
         host: &str,
         port: u16,
         tls: &'a Tls<'_>,
     ) -> Result<Self, ConnectionError> {
+        // 1. DNS + TCP connect (shared logic)
+        let socket = Self::connect_tcp(network, host, port).await?;
+
+        // 2. Build TLS config
+        //    server_name must outlive the Session, so we leak a tiny heap CString.
+        let host_cstring = CString::new(host).expect("hostname contains interior null byte");
+        let host_cstr: &'static core::ffi::CStr = Box::leak(host_cstring.into_boxed_c_str());
+
+        let tls_config = SessionConfig::Client(ClientSessionConfig {
+            auth_mode: AuthMode::None,
+            server_name: Some(host_cstr),
+            min_version: TlsVersion::Tls1_2,
+            ..ClientSessionConfig::new()
+        });
+
+        // 3. Create TLS session
+        let mut session = Session::new(tls.reference(), socket, &tls_config)
+            .map_err(ConnectionError::TlsSessionCreate)?;
+
+        // 4. TLS handshake
+        info!("TLS handshake...");
+        session
+            .connect()
+            .await
+            .map_err(ConnectionError::TlsHandshake)?;
+        info!("TLS established!");
+
+        Ok(Self {
+            inner: ConnectionInner::Tls(session),
+        })
+    }
+
+    /// Resolve `host`, claim a free buffer pair, and open a plain TCP
+    /// connection (with retries). No TLS handshake is performed.
+    pub async fn init_tcp(
+        network: embassy_net::Stack<'static>,
+        host: &str,
+        port: u16,
+    ) -> Result<Self, ConnectionError> {
+        let socket = Self::connect_tcp(network, host, port).await?;
+        Ok(Self {
+            inner: ConnectionInner::Tcp(socket),
+        })
+    }
+
+    /// Shared helper: DNS resolution, buffer claim, TCP connect with retries.
+    async fn connect_tcp(
+        network: embassy_net::Stack<'static>,
+        host: &str,
+        port: u16,
+    ) -> Result<TcpSocket<'static>, ConnectionError> {
         // 1. DNS resolution
-        let remote_ip = resolve(network, host).await?;
+        let remote_ip = resolve_dns(network, host).await?;
 
         // 2. Claim a free buffer pair from the static pool
         let (rx_buf, tx_buf) = Self::claim_buffers()?;
@@ -98,31 +154,24 @@ impl<'a> TlsConnection<'a> {
             return Err(ConnectionError::TcpConnect(e));
         }
 
-        // 5. Build TLS config
-        //    server_name must outlive the Session, so we leak a tiny heap CString.
-        let host_cstring = CString::new(host).expect("hostname contains interior null byte");
-        let host_cstr: &'static core::ffi::CStr = Box::leak(host_cstring.into_boxed_c_str());
+        Ok(socket)
+    }
 
-        let tls_config = SessionConfig::Client(ClientSessionConfig {
-            auth_mode: AuthMode::None,
-            server_name: Some(host_cstr),
-            min_version: TlsVersion::Tls1_2,
-            ..ClientSessionConfig::new()
-        });
-
-        // 6. Create TLS session
-        let mut session = Session::new(tls.reference(), socket, &tls_config)
-            .map_err(ConnectionError::TlsSessionCreate)?;
-
-        // 7. TLS handshake
-        info!("TLS handshake...");
-        session
-            .connect()
-            .await
-            .map_err(ConnectionError::TlsHandshake)?;
-        info!("TLS established!");
-
-        Ok(Self { session })
+    /// Close the connection cleanly.
+    ///
+    /// For TLS connections this performs the TLS close_notify handshake.
+    /// For plain TCP connections this closes the socket.
+    pub async fn close(&mut self) {
+        match &mut self.inner {
+            ConnectionInner::Tls(session) => {
+                if let Err(e) = session.close().await {
+                    info!("TLS close error (non-fatal): {:?}", e);
+                }
+            }
+            ConnectionInner::Tcp(socket) => {
+                socket.close();
+            }
+        }
     }
 
     #[allow(
@@ -148,17 +197,52 @@ impl<'a> TlsConnection<'a> {
     }
 }
 
-impl<'a> Deref for TlsConnection<'a> {
-    type Target = Session<'a, TcpSocket<'static>>;
+// ---- embedded_io_async trait impls -----------------------------------------
 
-    fn deref(&self) -> &Self::Target {
-        &self.session
+impl embedded_io::ErrorType for Connection<'_> {
+    type Error = embedded_io::ErrorKind;
+}
+
+impl Read for Connection<'_> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        match &mut self.inner {
+            ConnectionInner::Tls(session) => session
+                .read(buf)
+                .await
+                .map_err(|_| embedded_io::ErrorKind::Other),
+            ConnectionInner::Tcp(socket) => socket
+                .read(buf)
+                .await
+                .map_err(|_| embedded_io::ErrorKind::Other),
+        }
     }
 }
 
-impl<'a> DerefMut for TlsConnection<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.session
+impl Write for Connection<'_> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        match &mut self.inner {
+            ConnectionInner::Tls(session) => session
+                .write(buf)
+                .await
+                .map_err(|_| embedded_io::ErrorKind::Other),
+            ConnectionInner::Tcp(socket) => socket
+                .write(buf)
+                .await
+                .map_err(|_| embedded_io::ErrorKind::Other),
+        }
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        match &mut self.inner {
+            ConnectionInner::Tls(session) => session
+                .flush()
+                .await
+                .map_err(|_| embedded_io::ErrorKind::Other),
+            ConnectionInner::Tcp(socket) => socket
+                .flush()
+                .await
+                .map_err(|_| embedded_io::ErrorKind::Other),
+        }
     }
 }
 
@@ -190,7 +274,7 @@ pub fn init_tls(hardware: TlsHardware) -> Tls<'static> {
 // ---- Helpers ---------------------------------------------------------------
 
 /// Resolve a hostname to an IPv4 address via DNS.
-pub async fn resolve(
+pub async fn resolve_dns(
     network: embassy_net::Stack<'_>,
     host: &str,
 ) -> Result<IpAddress, ConnectionError> {

@@ -1,11 +1,12 @@
 use alloc::string::String;
 
-use crate::net::{self, TlsConnection};
+use crate::net::{self, Connection};
 use crate::translate;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_net::StackResources;
 use embassy_time::Duration;
+use embedded_io_async::Write as _;
 use esp_hal::peripherals::WIFI;
 use esp_radio::wifi::{AuthMethod, ClientConfig, ModeConfig, WifiController, WifiDevice};
 use mbedtls_rs::Tls;
@@ -84,15 +85,46 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
     const AUDIO_WAV: &[u8] = include_bytes!("../bin/assets/missile.wav");
     const WAV_HEADER_SIZE: usize = 44;
 
-    // ---- TLS connection -------------------------------------------------------
+    // ---- Deepgram connection ----------------------------------------------------
+    //
+    // DEEPGRAM_USE_TLS: "false" disables TLS (HTTP), defaults to "true" (HTTPS).
+    // DEEPGRAM_PORT:    override the port, defaults to 443.
 
-    let mut conn = TlsConnection::init(network, env!("DEEPGRAM_HOST"), 443, &tls)
-        .await
-        .expect("Failed to establish TLS connection");
+    const DEEPGRAM_USE_TLS: bool = konst::result::unwrap_ctx!(konst::primitive::parse_bool(
+        match option_env!("DEEPGRAM_USE_TLS") {
+            Some(v) => v,
+            None => "true",
+        }
+    ));
+
+    const DEEPGRAM_PORT: u16 = konst::result::unwrap_ctx!(konst::primitive::parse_u16(
+        match option_env!("DEEPGRAM_PORT") {
+            Some(v) => v,
+            None => "443",
+        }
+    ));
+
+    let mut conn = if DEEPGRAM_USE_TLS {
+        info!(
+            "Connecting to Deepgram over HTTPS (port {})...",
+            DEEPGRAM_PORT
+        );
+        Connection::init_tls(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT, tls)
+            .await
+            .expect("Failed to establish TLS connection")
+    } else {
+        info!(
+            "Connecting to Deepgram over HTTP (port {})...",
+            DEEPGRAM_PORT
+        );
+        Connection::init_tcp(network, env!("DEEPGRAM_HOST"), DEEPGRAM_PORT)
+            .await
+            .expect("Failed to establish TCP connection")
+    };
 
     // ---- WebSocket upgrade ----------------------------------------------------
 
-    net::websocket_upgrade(&mut *conn).await;
+    net::websocket_upgrade(&mut conn).await;
 
     // ---- Stream audio ---------------------------------------------------------
 
@@ -108,7 +140,7 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
 
     for (i, chunk) in audio_data.chunks(chunk_size).enumerate() {
         edge_ws::io::send(
-            &mut *conn,
+            &mut conn,
             edge_ws::FrameType::Binary(false),
             Some(mask_key),
             chunk,
@@ -154,8 +186,7 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
             remaining
         };
 
-        match embassy_time::with_timeout(timeout, edge_ws::io::recv(&mut *conn, &mut recv_buf))
-            .await
+        match embassy_time::with_timeout(timeout, edge_ws::io::recv(&mut conn, &mut recv_buf)).await
         {
             Err(_timeout) => {
                 // No frame arrived before the timeout.
@@ -190,7 +221,7 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
                 edge_ws::FrameType::Ping => {
                     info!("Ping received, sending pong");
                     let _ = edge_ws::io::send(
-                        &mut *conn,
+                        &mut conn,
                         edge_ws::FrameType::Pong,
                         Some(mask_key),
                         &recv_buf[..len],
@@ -219,7 +250,7 @@ pub async fn test_stream(network: embassy_net::Stack<'static>, tls: &Tls<'static
     if !done {
         let close_stream = b"{\"type\":\"CloseStream\"}";
         edge_ws::io::send(
-            &mut *conn,
+            &mut conn,
             edge_ws::FrameType::Text(false),
             Some(mask_key),
             close_stream,
@@ -248,7 +279,8 @@ async fn translate_response(stack: embassy_net::Stack<'static>, tls: &Tls<'_>, j
         return;
     }
 
-    let mut conn = match TlsConnection::init(stack, "translation.googleapis.com", 443, tls).await {
+    let mut conn = match Connection::init_tls(stack, env!("GOOGLE_TRANSLATE_HOST"), 443, tls).await
+    {
         Ok(c) => c,
         Err(e) => {
             info!("Failed to connect to Google Translate: {:?}", e);
@@ -256,11 +288,9 @@ async fn translate_response(stack: embassy_net::Stack<'static>, tls: &Tls<'_>, j
         }
     };
 
-    translate::translate_response(&mut *conn, transcript).await;
+    translate::translate_response(&mut conn, transcript).await;
 
-    // Close the TLS session cleanly so that PSA crypto resources are released
+    // Close the connection cleanly so that PSA crypto resources are released
     // before the Session is dropped.
-    if let Err(e) = conn.session.close().await {
-        info!("TLS close error (non-fatal): {:?}", e);
-    }
+    conn.close().await;
 }
