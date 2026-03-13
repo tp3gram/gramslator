@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gramslator</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      display: flex;
+      flex-direction: column;
+      padding: 1rem;
+      gap: 1rem;
+    }
+
+    /* --- Top Bar --- */
+    .top-bar {
+      flex: 0 0 auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: relative;
+    }
+
+    /* --- Config Dropdown --- */
+    .config-dropdown {
+      position: relative;
+    }
+
+    .config-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.55rem 1rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      line-height: 1;
+      background: #252525;
+      color: #aaa;
+      border: none;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.2s;
+    }
+
+    .config-toggle:hover {
+      background: #333;
+    }
+
+    .config-toggle .config-arrow {
+      display: inline-block;
+      transition: transform 0.2s;
+      font-size: 0.7rem;
+    }
+
+    .config-dropdown.open .config-arrow {
+      transform: rotate(90deg);
+    }
+
+    .config-panel {
+      display: none;
+      position: absolute;
+      top: calc(100% + 0.5rem);
+      left: 0;
+      z-index: 100;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 1.25rem 1.5rem;
+      width: calc(100vw - 2rem);
+      max-width: 600px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    }
+
+    .config-dropdown.open .config-panel {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: flex-end;
+    }
+
+    /* --- Status Indicator --- */
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.55rem 1rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      line-height: 1;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .status-badge[data-status="config-needed"] {
+      background: #2a2520;
+      color: #f5a623;
+    }
+    .status-badge[data-status="config-needed"] .status-dot {
+      background: #f5a623;
+    }
+
+    .status-badge[data-status="connecting"] {
+      background: #1e2a35;
+      color: #4a9eff;
+    }
+    .status-badge[data-status="connecting"] .status-dot {
+      background: #4a9eff;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    .status-badge[data-status="live"] {
+      background: #1a2e1a;
+      color: #4caf50;
+      cursor: pointer;
+    }
+    .status-badge[data-status="live"] .status-dot {
+      background: #4caf50;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    .status-badge[data-status="paused"] {
+      background: #2a2520;
+      color: #f5a623;
+      cursor: pointer;
+    }
+    .status-badge[data-status="paused"] .status-dot {
+      background: #f5a623;
+    }
+
+    .status-badge[data-status="error"] {
+      background: #2e1a1a;
+      color: #ef5350;
+    }
+    .status-badge[data-status="error"] .status-dot {
+      background: #ef5350;
+    }
+
+    .status-badge[data-status="mic-denied"] {
+      background: #2e1a1a;
+      color: #ef5350;
+    }
+    .status-badge[data-status="mic-denied"] .status-dot {
+      background: #ef5350;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    /* --- Translation Area --- */
+    .translation-area {
+      flex: 2 1 0;
+      padding: 0.5rem;
+      min-height: 0;
+      overflow-y: auto;
+      border-bottom: 1px solid #ffffff;
+    }
+
+    .translation-text {
+      font-size: 2.4rem;
+      font-weight: 500;
+      line-height: 1.4;
+      text-align: left;
+      color: rgb(128, 231, 251);
+      word-break: break-word;
+    }
+
+    .translation-text.placeholder {
+      color: #555;
+      font-style: italic;
+    }
+
+    /* --- Transcript Area --- */
+    .transcript-area {
+      flex: 1 1 0;
+      padding: 0.5rem;
+      min-height: 0;
+      overflow-y: auto;
+    }
+
+    .transcript-text {
+      font-size: 1.1rem;
+      line-height: 1.5;
+      text-align: left;
+      color: #ffffff;
+      word-break: break-word;
+    }
+
+    .transcript-text.placeholder {
+      color: #444;
+      font-style: italic;
+    }
+
+    .config-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      flex: 1;
+      min-width: 200px;
+    }
+
+    .config-field label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #888;
+    }
+
+    .config-field input,
+    .config-field select {
+      background: #0f0f0f;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 0.6rem 0.8rem;
+      font-size: 0.95rem;
+      color: #e0e0e0;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .config-field input:focus,
+    .config-field select:focus {
+      border-color: #4a9eff;
+    }
+
+    .config-field input::placeholder {
+      color: #555;
+    }
+
+    .config-field select {
+      cursor: pointer;
+    }
+
+    .config-field select option {
+      background: #1a1a1a;
+      color: #e0e0e0;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Bar: Config dropdown (left) + Status (right) -->
+  <div class="top-bar">
+    <div class="config-dropdown" id="configDropdown">
+      <button class="config-toggle" id="configToggle">
+        <span class="config-arrow">&#9654;</span>
+        Configuration
+      </button>
+      <div class="config-panel">
+        <div class="config-field">
+          <label for="dgKey">Deepgram API Key</label>
+          <input type="password" id="dgKey" placeholder="Enter Deepgram API key" autocomplete="off">
+        </div>
+        <div class="config-field">
+          <label for="googleKey">Google Translate API Key</label>
+          <input type="password" id="googleKey" placeholder="Enter Google API key" autocomplete="off">
+        </div>
+        <div class="config-field" style="min-width: 160px; flex: 0.5;">
+          <label for="targetLang">Target Language</label>
+          <select id="targetLang">
+            <option value="ar">Arabic</option>
+            <option value="zh">Chinese (Simplified)</option>
+            <option value="da">Danish</option>
+            <option value="nl">Dutch</option>
+            <option value="fi">Finnish</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="he">Hebrew</option>
+            <option value="hi">Hindi</option>
+            <option value="id">Indonesian</option>
+            <option value="ga">Irish</option>
+            <option value="it">Italian</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="no">Norwegian</option>
+            <option value="pl">Polish</option>
+            <option value="pt">Portuguese</option>
+            <option value="ru">Russian</option>
+            <option value="es" selected>Spanish</option>
+            <option value="sv">Swedish</option>
+            <option value="th">Thai</option>
+            <option value="tr">Turkish</option>
+            <option value="uk">Ukrainian</option>
+            <option value="vi">Vietnamese</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div class="status-badge" id="statusBadge" data-status="config-needed">
+      <span class="status-dot"></span>
+      <span id="statusText">Configuration Needed</span>
+    </div>
+  </div>
+
+  <!-- Translation Display -->
+  <div class="translation-area">
+    <div class="translation-text placeholder" id="translationDisplay">Translation will appear here</div>
+  </div>
+
+  <!-- Transcript Display -->
+  <div class="transcript-area">
+    <div class="transcript-text placeholder" id="transcriptDisplay">Transcript will appear here</div>
+  </div>
+
+  <script>
+    // ---- DOM Elements ----
+    const statusBadge = document.getElementById('statusBadge');
+    const statusText = document.getElementById('statusText');
+    const translationDisplay = document.getElementById('translationDisplay');
+    const transcriptDisplay = document.getElementById('transcriptDisplay');
+    const dgKeyInput = document.getElementById('dgKey');
+    const googleKeyInput = document.getElementById('googleKey');
+    const targetLangSelect = document.getElementById('targetLang');
+    const configDropdown = document.getElementById('configDropdown');
+    const configToggle = document.getElementById('configToggle');
+
+    // ---- Config Dropdown Toggle ----
+    configToggle.addEventListener('click', () => {
+      configDropdown.classList.toggle('open');
+    });
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!configDropdown.contains(e.target)) {
+        configDropdown.classList.remove('open');
+      }
+    });
+
+    // ---- State ----
+    let socket = null;
+    let mediaRecorder = null;
+    let mediaStream = null;
+    let lastTranslatedText = '';
+    let translationRequestId = 0; // to discard stale responses
+    let paused = false;
+
+    // ---- Pause / Resume via Status Badge ----
+    statusBadge.addEventListener('click', () => {
+      const currentStatus = statusBadge.getAttribute('data-status');
+      if (currentStatus === 'live') {
+        paused = true;
+        teardown();
+        setStatus('paused', 'Paused');
+      } else if (currentStatus === 'paused') {
+        paused = false;
+        tryConnect();
+      }
+    });
+
+    // ---- LocalStorage Persistence ----
+    const LS_DG_KEY = 'lt_dgKey';
+    const LS_GOOGLE_KEY = 'lt_googleKey';
+    const LS_TARGET_LANG = 'lt_targetLang';
+
+    function saveSettings() {
+      localStorage.setItem(LS_DG_KEY, dgKeyInput.value);
+      localStorage.setItem(LS_GOOGLE_KEY, googleKeyInput.value);
+      localStorage.setItem(LS_TARGET_LANG, targetLangSelect.value);
+    }
+
+    function restoreSettings() {
+      const dg = localStorage.getItem(LS_DG_KEY);
+      const google = localStorage.getItem(LS_GOOGLE_KEY);
+      const lang = localStorage.getItem(LS_TARGET_LANG);
+      if (dg) dgKeyInput.value = dg;
+      if (google) googleKeyInput.value = google;
+      if (lang) targetLangSelect.value = lang;
+    }
+
+    // ---- Status Management ----
+    function setStatus(status, text) {
+      statusBadge.setAttribute('data-status', status);
+      statusText.textContent = text;
+    }
+
+    // ---- Display Helpers ----
+    const transcriptArea = document.querySelector('.transcript-area');
+    const translationArea = document.querySelector('.translation-area');
+
+    function scrollToBottom(el) {
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function setTranscript(text) {
+      if (text) {
+        transcriptDisplay.textContent = text;
+        transcriptDisplay.classList.remove('placeholder');
+      } else {
+        transcriptDisplay.textContent = 'Transcript will appear here';
+        transcriptDisplay.classList.add('placeholder');
+      }
+      scrollToBottom(transcriptArea);
+    }
+
+    function setTranslation(text) {
+      if (text) {
+        translationDisplay.textContent = text;
+        translationDisplay.classList.remove('placeholder');
+      } else {
+        translationDisplay.textContent = 'Translation will appear here';
+        translationDisplay.classList.add('placeholder');
+      }
+      scrollToBottom(translationArea);
+    }
+
+    // ---- Google Translate ----
+    async function translate(text) {
+      const googleKey = googleKeyInput.value.trim();
+      const target = targetLangSelect.value;
+      if (!googleKey || !text) return null;
+
+      const requestId = ++translationRequestId;
+
+      try {
+        const resp = await fetch(
+          `https://translation.googleapis.com/language/translate/v2?key=${encodeURIComponent(googleKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ q: text, target: target, format: 'text' })
+          }
+        );
+
+        // Discard if a newer request has been made
+        if (requestId !== translationRequestId) return null;
+
+        if (!resp.ok) {
+          console.error('Translation API error:', resp.status, await resp.text());
+          return null;
+        }
+
+        const data = await resp.json();
+        return data.data.translations[0].translatedText;
+      } catch (err) {
+        console.error('Translation fetch error:', err);
+        return null;
+      }
+    }
+
+    async function translateAndDisplay(text) {
+      if (!text || text === lastTranslatedText) return;
+      lastTranslatedText = text;
+
+      const translated = await translate(text);
+      if (translated !== null) {
+        setTranslation(translated);
+      }
+    }
+
+    // ---- Deepgram WebSocket ----
+    function handleTurnInfo(msg) {
+      const event = msg.event;
+      const transcript = msg.transcript || '';
+
+      switch (event) {
+        case 'StartOfTurn':
+        case 'Update':
+        case 'EagerEndOfTurn':
+        case 'TurnResumed':
+        case 'EndOfTurn':
+          if (transcript) {
+            setTranscript(transcript);
+            translateAndDisplay(transcript);
+          }
+          break;
+
+        default:
+          break;
+      }
+    }
+
+    function openDeepgramConnection() {
+      const dgKey = dgKeyInput.value.trim();
+      if (!dgKey) return;
+
+      setStatus('connecting', 'Connecting...');
+
+      const wsUrl = `wss://api.deepgram.com/v2/listen?model=flux-general-en`;
+
+      // Browser WebSockets can't set headers; pass API key via subprotocol
+      socket = new WebSocket(wsUrl, ['token', dgKey]);
+
+      socket.onopen = () => {
+        console.log('Deepgram WebSocket opened');
+        setStatus('live', 'Live');
+        startRecording();
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+
+          if (msg.type === 'TurnInfo') {
+            handleTurnInfo(msg);
+          } else if (msg.type === 'Connected') {
+            console.log('Deepgram connected, request_id:', msg.request_id);
+          } else if (msg.type === 'Error') {
+            console.error('Deepgram error:', msg.description);
+            setStatus('error', 'Connection Error');
+          }
+        } catch (err) {
+          console.error('Error parsing Deepgram message:', err);
+        }
+      };
+
+      socket.onerror = (err) => {
+        console.error('WebSocket error:', err);
+        setStatus('error', 'Connection Error');
+      };
+
+      socket.onclose = (event) => {
+        console.log('WebSocket closed:', event.code, event.reason);
+        if (statusBadge.getAttribute('data-status') === 'live') {
+          setStatus('error', 'Connection Error');
+        }
+        stopRecording();
+        socket = null;
+      };
+    }
+
+    // ---- Microphone & MediaRecorder ----
+    function startRecording() {
+      if (!mediaStream) return;
+
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm;codecs=opus' });
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0 && socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(event.data);
+        }
+      };
+
+      mediaRecorder.start(250); // 250ms timeslices
+    }
+
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+      }
+      mediaRecorder = null;
+    }
+
+    function stopMicrophone() {
+      stopRecording();
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+        mediaStream = null;
+      }
+    }
+
+    // ---- Connection Lifecycle ----
+    function teardown() {
+      if (socket) {
+        try {
+          socket.send(JSON.stringify({ type: 'CloseStream' }));
+        } catch (e) { /* ignore */ }
+        socket.close();
+        socket = null;
+      }
+      stopMicrophone();
+      lastTranslatedText = '';
+      translationRequestId++;
+    }
+
+    async function tryConnect() {
+      const dgKey = dgKeyInput.value.trim();
+      const googleKey = googleKeyInput.value.trim();
+
+      // If either key is missing, tear down and show config needed
+      if (!dgKey || !googleKey) {
+        paused = false;
+        teardown();
+        setStatus('config-needed', 'Configuration Needed');
+        return;
+      }
+
+      // Don't auto-connect if paused
+      if (paused) return;
+
+      // If already connected, don't reconnect
+      if (socket && socket.readyState === WebSocket.OPEN) return;
+
+      // If a connection is in progress, don't start another
+      if (socket && socket.readyState === WebSocket.CONNECTING) return;
+
+      // Tear down any stale connection
+      teardown();
+
+      setStatus('connecting', 'Connecting...');
+
+      // Request microphone
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        console.error('Microphone access denied:', err);
+        setStatus('mic-denied', 'Microphone Denied');
+        return;
+      }
+
+      openDeepgramConnection();
+    }
+
+    // ---- Event Listeners ----
+    let connectDebounce = null;
+
+    function scheduleConnect() {
+      clearTimeout(connectDebounce);
+      connectDebounce = setTimeout(tryConnect, 500);
+    }
+
+    dgKeyInput.addEventListener('input', () => { saveSettings(); scheduleConnect(); });
+    googleKeyInput.addEventListener('input', () => { saveSettings(); scheduleConnect(); });
+
+    // When target language changes, save and re-translate the current text if we have one
+    targetLangSelect.addEventListener('change', () => {
+      saveSettings();
+      if (lastTranslatedText) {
+        const textToRetranslate = lastTranslatedText;
+        lastTranslatedText = ''; // force re-translation
+        translateAndDisplay(textToRetranslate);
+      }
+    });
+
+    // ---- Initialize ----
+    restoreSettings();
+    scheduleConnect();
+  </script>
+
+</body>
+</html>

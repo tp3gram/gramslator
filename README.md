@@ -74,3 +74,9 @@ Screen (ILI9488 driver, page 23 of driver datasheet)
 
   - INT IO47
   - RST IO48
+
+## Web app
+
+As a fun little side-project, I've written up a small web app that has a similar interface.  It's a single HTML5 document, in `web/index.html`. After providing a Deepgram API key and a Google API key, it will automatically connect to Deepgram and provide live translation.
+
+Tap the status badge to pause the transcription/translation.
