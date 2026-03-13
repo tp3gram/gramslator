@@ -140,6 +140,12 @@ async fn main(spawner: Spawner) -> ! {
         delay,
     );
 
+    // ---- Shared signals (created early so WiFi init can use display_signal) ----
+
+    // Display signal — any task signals this to wake the display renderer.
+    static DISPLAY_SIGNAL: StaticCell<gramslator::app_state::DisplaySignal> = StaticCell::new();
+    let display_signal: &'static gramslator::app_state::DisplaySignal =
+        DISPLAY_SIGNAL.init(gramslator::app_state::DisplaySignal::new());
     // ---- Touch (GT911 via I2C) ------------------------------------------------
 
     let i2c_touch = elecrow_board::touch::init(elecrow_board::touch::TouchHardware {
@@ -156,6 +162,7 @@ async fn main(spawner: Spawner) -> ! {
             wifi: peripherals.WIFI,
         },
         &spawner,
+        display_signal,
     );
 
     // ---- TLS initialization ---------------------------------------------------
@@ -191,13 +198,6 @@ async fn main(spawner: Spawner) -> ! {
         esp_alloc::HEAP.free()
     );
 
-    // ---- Shared signals --------------------------------------------------------
-
-    // Display signal — any task signals this to wake the display renderer.
-    static DISPLAY_SIGNAL: StaticCell<gramslator::app_state::DisplaySignal> = StaticCell::new();
-    let display_signal: &'static gramslator::app_state::DisplaySignal =
-        DISPLAY_SIGNAL.init(gramslator::app_state::DisplaySignal::new());
-
     // Translate signal — the Deepgram task signals this to request a translation.
     static TRANSLATE_SIGNAL: StaticCell<gramslator::translation::TranslateSignal> =
         StaticCell::new();
@@ -205,14 +205,15 @@ async fn main(spawner: Spawner) -> ! {
 
     // ---- Spawn tasks -----------------------------------------------------------
 
-    // Translation task (existing, now receives display_signal too).
-    let translate_signal = gramslator::translation::spawn_translation_task(
-        translate_signal,
-        &spawner,
-        network,
-        tls,
-        display_signal,
-    );
+    // Translation task.
+    spawner
+        .spawn(gramslator::translation::translation_task(
+            translate_signal,
+            network,
+            tls,
+            display_signal,
+        ))
+        .expect("Failed to spawn translation task");
 
     // Deepgram streaming task (persistent, reconnects on failure).
     spawner

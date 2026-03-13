@@ -2,6 +2,8 @@ use defmt::info;
 use embassy_time::{Duration, Timer};
 use esp_radio::wifi::WifiController;
 
+use crate::app_state::{self, DisplaySignal, ServiceStatus};
+
 const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DHCP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_WIFI_RETRIES: usize = 5;
@@ -15,6 +17,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(2);
 pub(super) async fn wifi_connect_task(
     wifi_controller: &'static mut WifiController<'static>,
     stack: embassy_net::Stack<'static>,
+    display_signal: &'static DisplaySignal,
 ) {
     // Starting the radio is a one-time operation — if this fails the hardware
     // is broken and there's nothing to retry.
@@ -83,8 +86,11 @@ pub(super) async fn wifi_connect_task(
         }
     }
 
-    panic!(
+    defmt::error!(
         "Failed to connect to WiFi after {} attempts",
         MAX_WIFI_RETRIES
     );
+    if app_state::update_wifi_status(ServiceStatus::Error) {
+        display_signal.signal(());
+    }
 }

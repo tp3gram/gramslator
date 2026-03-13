@@ -1,6 +1,7 @@
 extern crate alloc;
 
 mod wifi_connect_task;
+mod wifi_status_task;
 
 use alloc::string::String;
 
@@ -10,7 +11,9 @@ use esp_hal::peripherals::WIFI;
 use esp_radio::wifi::{AuthMethod, ClientConfig, ModeConfig, WifiController, WifiDevice};
 use static_cell::StaticCell;
 
+use crate::app_state::DisplaySignal;
 use wifi_connect_task::wifi_connect_task;
+use wifi_status_task::wifi_status_task;
 
 pub struct NetworkHardware {
     pub wifi: WIFI<'static>,
@@ -28,7 +31,11 @@ async fn net_task(mut runner: embassy_net::Runner<'static, WifiDevice<'static>>)
 /// network is ready, so callers don't need to poll for readiness — they
 /// can proceed with other initialization and the first network call will
 /// naturally wait.
-pub fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::Stack<'static> {
+pub fn init(
+    hardware: NetworkHardware,
+    spawner: &Spawner,
+    display_signal: &'static DisplaySignal,
+) -> embassy_net::Stack<'static> {
     static RADIO_CONTROLLER: StaticCell<esp_radio::Controller<'static>> = StaticCell::new();
     let radio_init = RADIO_CONTROLLER
         .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
@@ -61,8 +68,12 @@ pub fn init(hardware: NetworkHardware, spawner: &Spawner) -> embassy_net::Stack<
         .expect("Failed to spawn net task");
 
     spawner
-        .spawn(wifi_connect_task(wifi_controller, stack))
+        .spawn(wifi_connect_task(wifi_controller, stack, display_signal))
         .expect("Failed to spawn WiFi connect task");
+
+    spawner
+        .spawn(wifi_status_task(stack, display_signal))
+        .expect("Failed to spawn WiFi status task");
 
     stack
 }

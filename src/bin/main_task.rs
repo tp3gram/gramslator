@@ -1,7 +1,7 @@
 use defmt::info;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write as _;
-use gramslator::app_state::DisplaySignal;
+use gramslator::app_state::{self, DisplaySignal, ServiceStatus};
 use gramslator::elecrow_board::mic::MIC_PIPE;
 use gramslator::networking::{self as net, handle_ws_frame};
 use gramslator::translation as translate;
@@ -79,10 +79,22 @@ pub async fn read_mic_and_send_loop_task(
 
     loop {
         // ---- Connect to Deepgram ----------------------------------------
+        if app_state::update_deepgram_status(ServiceStatus::Connecting) {
+            display_signal.signal(());
+        }
+
         let mut conn = match net::deepgram_create_listen_socket(network, tls).await {
-            Ok(c) => c,
+            Ok(c) => {
+                if app_state::update_deepgram_status(ServiceStatus::Connected) {
+                    display_signal.signal(());
+                }
+                c
+            }
             Err(e) => {
                 info!("Deepgram connect failed: {:?}, retrying...", e);
+                if app_state::update_deepgram_status(ServiceStatus::Error) {
+                    display_signal.signal(());
+                }
                 Timer::after(RECONNECT_DELAY).await;
                 continue;
             }
@@ -175,6 +187,9 @@ pub async fn read_mic_and_send_loop_task(
         translate_signal.signal(translate::TranscriptMessage::Flush);
 
         conn.close().await;
+        if app_state::update_deepgram_status(ServiceStatus::Error) {
+            display_signal.signal(());
+        }
         info!(
             "Deepgram connection lost. Reconnecting in {} s...",
             RECONNECT_DELAY.as_secs()

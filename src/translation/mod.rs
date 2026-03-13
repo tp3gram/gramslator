@@ -1,8 +1,10 @@
 mod client;
-mod task;
+mod helpers;
+pub mod translation_task;
 
 pub use client::{TranslateError, translate_text};
-pub use task::{
+pub use helpers::{
     TranscriptMessage, TranslateSignal, check_translation_cache, extract_transcript,
-    spawn_translation_task, translate_response,
+    translate_response,
 };
+pub use translation_task::translation_task;

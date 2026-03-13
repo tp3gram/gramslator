@@ -8,6 +8,7 @@ use embedded_graphics::prelude::*;
 use super::font::FontRenderer;
 use super::framebuffer::Framebuffer;
 use super::layout::*;
+use super::status::{draw_primary_status, draw_translate_status, primary_status_text, translate_status_text};
 
 /// Embassy task: renders the current translation (large, top 2/3) and
 /// transcript (small, bottom 1/3).
@@ -36,6 +37,8 @@ pub async fn display_task(
 
     let mut last_transcript = String::new();
     let mut last_translation = String::new();
+    let mut last_primary_status: &str = "";
+    let mut last_tr_status: &str = "";
     let mut translation_sec = Section::new();
     let mut transcript_sec = Section::new();
 
@@ -49,28 +52,54 @@ pub async fn display_task(
             display_signal.wait().await;
         }
 
-        // ---- Check for updated text ------------------------------------
-        let (transcript, translation) = crate::app_state::read_state();
+        // ---- Check for updated state ------------------------------------
+        let state = crate::app_state::read_state();
 
-        if translation != last_translation {
+        if state.translation != last_translation {
             translation_sec.update_text(
-                &translation,
+                &state.translation,
                 &renderer,
                 TRANSLATION_PX,
                 max_text_width,
                 translation_section_h as f32,
             );
-            last_translation = translation;
+            last_translation = state.translation;
         }
-        if transcript != last_transcript {
+        if state.transcript != last_transcript {
             transcript_sec.update_text(
-                &transcript,
+                &state.transcript,
                 &renderer,
                 TRANSCRIPT_PX,
                 max_text_width,
                 transcript_section_h as f32,
             );
-            last_transcript = transcript;
+            last_transcript = state.transcript;
+        }
+
+        // ---- Primary status (WiFi / Deepgram) — centered, large, white -
+        let primary_status = primary_status_text(state.wifi_status, state.deepgram_status);
+
+        if primary_status != last_primary_status {
+            draw_primary_status(
+                &mut fb,
+                &mut renderer,
+                state.wifi_status,
+                primary_status,
+                translation_section_h,
+            );
+            if primary_status.is_empty() {
+                // Status cleared — force redraw of translation text.
+                translation_sec.needs_redraw = true;
+            }
+            last_primary_status = primary_status;
+        }
+
+        // ---- Translate status — small indicator, top-right corner -------
+        let tr_status = translate_status_text(state.translate_status);
+
+        if tr_status != last_tr_status {
+            draw_translate_status(&mut fb, &mut renderer, tr_status);
+            last_tr_status = tr_status;
         }
 
         // ---- Advance scroll animations ---------------------------------
@@ -78,7 +107,8 @@ pub async fn display_task(
         transcript_sec.advance(scroll_per_frame);
 
         // ---- Render sections that need it ------------------------------
-        if translation_sec.needs_redraw {
+        // Skip translation rendering while a primary status overlay is shown.
+        if translation_sec.needs_redraw && last_primary_status.is_empty() {
             render_section(
                 &mut fb,
                 &mut renderer,
