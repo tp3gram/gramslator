@@ -23,6 +23,9 @@ use esp_hal::peripherals::{GPIO15, GPIO16, GPIO48, I2C0};
 use esp_hal::time::Rate;
 use gt911::Gt911;
 
+use crate::app_state::{self, DisplaySignal};
+use crate::translation::{TranscriptMessage, TranslateSignal};
+
 /// Display width in pixels (after 270° rotation).
 const DISPLAY_WIDTH: u16 = 480;
 
@@ -90,9 +93,15 @@ pub fn init(hw: TouchHardware<'_>) -> I2c<'_, esp_hal::Async> {
 /// Long-running Embassy task that polls the GT911 for touch events.
 ///
 /// Each detected touch is classified into a **left** or **right** zone based
-/// on the X coordinate relative to [`ZONE_MID_X`] and logged via `defmt`.
+/// on the X coordinate relative to [`ZONE_MID_X`].  Left/right touches
+/// cycle the target translation language backward/forward and signal the
+/// display to update.
 #[embassy_executor::task]
-pub async fn touch_task(mut i2c: I2c<'static, esp_hal::Async>) {
+pub async fn touch_task(
+    mut i2c: I2c<'static, esp_hal::Async>,
+    display_signal: &'static DisplaySignal,
+    translate_signal: &'static TranslateSignal,
+) {
     let gt = Gt911::default();
     let mut buf = [0u8; 8]; // GET_TOUCH_BUF_SIZE
 
@@ -134,18 +143,29 @@ pub async fn touch_task(mut i2c: I2c<'static, esp_hal::Async>) {
                     Zone::Right
                 };
 
-                // Only log on initial contact or when sliding into the other zone.
+                // Only act on initial contact or when sliding into the other zone.
                 if active_zone != Some(zone) {
-                    match zone {
-                        Zone::Left => info!(
-                            "Touch LEFT  — display=({}, {}), raw=({}, {}), area={}",
-                            display_x, display_y, point.x, point.y, point.area
-                        ),
-                        Zone::Right => info!(
-                            "Touch RIGHT — display=({}, {}), raw=({}, {}), area={}",
-                            display_x, display_y, point.x, point.y, point.area
-                        ),
-                    }
+                    let new_lang = match zone {
+                        Zone::Left => {
+                            let lang = app_state::cycle_target_lang(false);
+                            info!(
+                                "Touch LEFT  — lang={}, display=({}, {})",
+                                lang, display_x, display_y
+                            );
+                            lang
+                        }
+                        Zone::Right => {
+                            let lang = app_state::cycle_target_lang(true);
+                            info!(
+                                "Touch RIGHT — lang={}, display=({}, {})",
+                                lang, display_x, display_y
+                            );
+                            lang
+                        }
+                    };
+                    let _ = new_lang;
+                    display_signal.signal(());
+                    translate_signal.signal(TranscriptMessage::Retranslate);
                     active_zone = Some(zone);
                 }
             }

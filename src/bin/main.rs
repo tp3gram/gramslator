@@ -237,9 +237,13 @@ async fn main(spawner: Spawner) -> ! {
         .expect("Failed to spawn display task");
     info!("Display task spawned");
 
-    // Touch task (polls GT911, logs left/right zone presses).
+    // Touch task (polls GT911, cycles target language on left/right touch).
     spawner
-        .spawn(elecrow_board::touch::touch_task(i2c_touch))
+        .spawn(elecrow_board::touch::touch_task(
+            i2c_touch,
+            display_signal,
+            translate_signal,
+        ))
         .expect("Failed to spawn touch task");
     info!("Touch task spawned");
 
