@@ -14,8 +14,8 @@ mod display;
 
 use defmt::info;
 use embassy_executor::Spawner;
-use esp_backtrace as _;
 use embassy_time::{Duration, Timer};
+use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::dma_circular_buffers;
 use esp_hal::interrupt::software::SoftwareInterruptControl;

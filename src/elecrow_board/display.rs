@@ -19,10 +19,10 @@ use esp_hal::time::Rate;
 
 use embedded_hal::spi::{ErrorType, Operation, SpiBus, SpiDevice};
 
+use mipidsi::Builder;
 use mipidsi::interface::SpiInterface;
 use mipidsi::models::ILI9488Rgb666;
 use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
-use mipidsi::Builder;
 
 // Keep embedded-graphics imports for draw_smiley helper.
 use embedded_graphics::Drawable;
@@ -128,22 +128,12 @@ impl<'a> AsyncDisplay<'a> {
         // Column Address Set (0x2A)
         self.send_cmd(
             0x2A,
-            &[
-                (sx >> 8) as u8,
-                sx as u8,
-                (ex >> 8) as u8,
-                ex as u8,
-            ],
+            &[(sx >> 8) as u8, sx as u8, (ex >> 8) as u8, ex as u8],
         );
         // Page Address Set (0x2B)
         self.send_cmd(
             0x2B,
-            &[
-                (sy >> 8) as u8,
-                sy as u8,
-                (ey >> 8) as u8,
-                ey as u8,
-            ],
+            &[(sy >> 8) as u8, sy as u8, (ey >> 8) as u8, ey as u8],
         );
     }
 
@@ -185,8 +175,7 @@ impl<'a> AsyncDisplay<'a> {
 
         for row in 0..h as usize {
             for col in 0..w as usize {
-                let fb_idx =
-                    ((sy as usize + row) * fb_width as usize + (sx as usize + col)) * 3;
+                let fb_idx = ((sy as usize + row) * fb_width as usize + (sx as usize + col)) * 3;
                 wire_buf[wire_pos] = fb_buf[fb_idx] << 2;
                 wire_buf[wire_pos + 1] = fb_buf[fb_idx + 1] << 2;
                 wire_buf[wire_pos + 2] = fb_buf[fb_idx + 2] << 2;
@@ -259,7 +248,10 @@ pub fn init<'a>(
     );
 
     // -- mipidsi init phase (blocking) ------------------------------------
-    let device = InitSpiDevice { bus: spi_dma_bus, cs };
+    let device = InitSpiDevice {
+        bus: spi_dma_bus,
+        cs,
+    };
     let mut buffer = [0u8; 1024];
     let spi_interface = SpiInterface::new(device, dc, &mut buffer);
 

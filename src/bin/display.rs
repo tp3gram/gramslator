@@ -532,8 +532,7 @@ impl FontRenderer {
     /// The data must be `'static` (e.g. from `include_bytes!`).
     /// Construction is essentially free — no glyph outlines are processed.
     pub fn new(font_data: &'static [u8]) -> Self {
-        let face =
-            ttf_parser::Face::parse(font_data, 0).expect("Failed to parse TTF/OTF font");
+        let face = ttf_parser::Face::parse(font_data, 0).expect("Failed to parse TTF/OTF font");
         Self {
             face,
             cache: BTreeMap::new(),
@@ -639,11 +638,7 @@ impl FontRenderer {
             }
         };
 
-        let advance_width = self
-            .face
-            .glyph_hor_advance(glyph_id)
-            .unwrap_or(0) as f32
-            * scale;
+        let advance_width = self.face.glyph_hor_advance(glyph_id).unwrap_or(0) as f32 * scale;
 
         let bbox = match self.face.glyph_bounding_box(glyph_id) {
             Some(bb) => bb,
@@ -694,8 +689,7 @@ impl FontRenderer {
         const PAD: usize = 1;
         let rast_w = width + PAD * 2;
         let rast_h = height + PAD * 2;
-        let mut rasterizer =
-            ab_glyph_rasterizer::Rasterizer::new(rast_w, rast_h);
+        let mut rasterizer = ab_glyph_rasterizer::Rasterizer::new(rast_w, rast_h);
 
         // The bridge translates font-unit coordinates to pixel-space
         // bitmap coordinates, offset by PAD so the glyph sits inside the
@@ -866,10 +860,7 @@ impl FontRenderer {
         bg: Rgb666,
     ) -> Result<Point, D::Error> {
         // Measure total advance width first.
-        let total_width: f32 = text
-            .chars()
-            .map(|ch| self.char_advance(ch, px))
-            .sum();
+        let total_width: f32 = text.chars().map(|ch| self.char_advance(ch, px)).sum();
         let x = (display_width - total_width as i32) / 2;
         self.draw_text(display, text, Point::new(x, y), px, color, bg)
     }
@@ -1088,7 +1079,8 @@ const BG: Rgb666 = Rgb666::BLACK;
 const SCROLL_SPEED: f32 = 700.0;
 /// Duration of one animation frame (~30 fps).
 const ANIM_FRAME_MS: u64 = 33;
-const ANIM_FRAME_DURATION: embassy_time::Duration = embassy_time::Duration::from_millis(ANIM_FRAME_MS);
+const ANIM_FRAME_DURATION: embassy_time::Duration =
+    embassy_time::Duration::from_millis(ANIM_FRAME_MS);
 
 // ===========================================================================
 // Per-section scroll / animation state
