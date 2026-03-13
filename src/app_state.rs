@@ -1,9 +1,9 @@
 //! Shared application state for cross-task communication.
 //!
 //! Provides a global [`AppState`] holding the current transcript,
-//! translation, and service connection statuses, protected by a
-//! `critical_section::Mutex`.  Helper functions allow any Embassy task to
-//! update or read the state atomically.
+//! translation, target language, and service connection statuses,
+//! protected by a `critical_section::Mutex`.  Helper functions allow any
+//! Embassy task to update or read the state atomically.
 //!
 //! A [`DisplaySignal`] is used to wake the display task whenever the
 //! visible state changes.
@@ -37,6 +37,9 @@ pub enum ServiceStatus {
     Error,
 }
 
+/// Supported target language codes, cycled through via left/right touch.
+pub const LANGUAGES: &[&str] = &["es", "fr", "de", "ja", "ga", "hi", "uk"];
+
 /// Application-visible state shared between tasks.
 struct AppState {
     /// The most recent transcript received from Deepgram.
@@ -49,6 +52,8 @@ struct AppState {
     deepgram_status: ServiceStatus,
     /// Google Translate connection status.
     translate_status: ServiceStatus,
+    /// Index into [`LANGUAGES`] for the current target language.
+    target_lang_index: usize,
 }
 
 /// Snapshot of the shared state, returned by [`read_state`].
@@ -58,6 +63,7 @@ pub struct StateSnapshot {
     pub wifi_status: ServiceStatus,
     pub deepgram_status: ServiceStatus,
     pub translate_status: ServiceStatus,
+    pub target_lang: &'static str,
 }
 
 /// Global shared state, initialised lazily on first write.
@@ -74,6 +80,7 @@ fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
             wifi_status: ServiceStatus::Idle,
             deepgram_status: ServiceStatus::Idle,
             translate_status: ServiceStatus::Idle,
+            target_lang_index: 0,
         });
         f(state)
     })
@@ -145,8 +152,9 @@ pub fn update_translate_status(status: ServiceStatus) -> bool {
 
 /// Read a snapshot of the current state.
 ///
-/// If no state has been written yet, all strings are empty and all
-/// statuses are [`ServiceStatus::Idle`].
+/// If no state has been written yet, all strings are empty, all
+/// statuses are [`ServiceStatus::Idle`], and the language defaults to
+/// the first entry in [`LANGUAGES`].
 pub fn read_state() -> StateSnapshot {
     critical_section::with(|cs| {
         let borrow = STATE.borrow_ref(cs);
@@ -157,6 +165,7 @@ pub fn read_state() -> StateSnapshot {
                 wifi_status: state.wifi_status,
                 deepgram_status: state.deepgram_status,
                 translate_status: state.translate_status,
+                target_lang: LANGUAGES[state.target_lang_index],
             },
             None => StateSnapshot {
                 transcript: String::new(),
@@ -164,7 +173,34 @@ pub fn read_state() -> StateSnapshot {
                 wifi_status: ServiceStatus::Idle,
                 deepgram_status: ServiceStatus::Idle,
                 translate_status: ServiceStatus::Idle,
+                target_lang: LANGUAGES[0],
             },
+        }
+    })
+}
+
+/// Cycle the target language forward (`forward = true`) or backward.
+///
+/// Returns the new language code.
+pub fn cycle_target_lang(forward: bool) -> &'static str {
+    with_state(|state| {
+        let len = LANGUAGES.len();
+        state.target_lang_index = if forward {
+            (state.target_lang_index + 1) % len
+        } else {
+            (state.target_lang_index + len - 1) % len
+        };
+        LANGUAGES[state.target_lang_index]
+    })
+}
+
+/// Read the current target language code without cloning other state.
+pub fn read_target_lang() -> &'static str {
+    critical_section::with(|cs| {
+        let borrow = STATE.borrow_ref(cs);
+        match &*borrow {
+            Some(state) => LANGUAGES[state.target_lang_index],
+            None => LANGUAGES[0],
         }
     })
 }

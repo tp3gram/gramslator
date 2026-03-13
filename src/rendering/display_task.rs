@@ -6,9 +6,11 @@ use defmt::info;
 use embedded_graphics::prelude::*;
 
 use super::font::FontRenderer;
-use super::framebuffer::Framebuffer;
+use super::framebuffer::{Framebuffer, Point, Rectangle, Rgb666, Size};
 use super::layout::*;
-use super::status::{draw_primary_status, draw_translate_status, primary_status_text, translate_status_text};
+use super::status::{
+    draw_primary_status, draw_translate_status, primary_status_text, translate_status_text,
+};
 
 /// Embassy task: renders the current translation (large, top 2/3) and
 /// transcript (small, bottom 1/3).
@@ -39,16 +41,33 @@ pub async fn display_task(
     let mut last_translation = String::new();
     let mut last_primary_status: &str = "";
     let mut last_tr_status: &str = "";
+    let mut last_lang: &str = crate::app_state::read_target_lang();
     let mut translation_sec = Section::new();
     let mut transcript_sec = Section::new();
 
+    /// How long the centered language overlay stays on screen.
+    const LANG_OVERLAY_DURATION: embassy_time::Duration = embassy_time::Duration::from_secs(1);
+
+    // Show the default language overlay immediately on boot.
+    render_lang_overlay(&mut fb, &mut renderer, last_lang);
+    fb.flush_async(&mut hw_display).await.unwrap();
+    let mut lang_overlay_until: Option<embassy_time::Instant> =
+        Some(embassy_time::Instant::now() + LANG_OVERLAY_DURATION);
+
     loop {
-        // If either section is animating, poll with a short timeout so we
-        // keep advancing the scroll.  Otherwise block on the signal.
+        // ---- Wait for something to happen ------------------------------
         let animating = translation_sec.is_animating() || transcript_sec.is_animating();
+
         if animating {
+            // Scroll animation in progress — keep advancing at ~30 fps.
             let _ = embassy_time::with_timeout(ANIM_FRAME_DURATION, display_signal.wait()).await;
+        } else if let Some(deadline) = lang_overlay_until {
+            // Overlay is showing — sleep until it expires or a signal
+            // arrives, whichever comes first.  No busy loop.
+            let remaining = deadline.saturating_duration_since(embassy_time::Instant::now());
+            let _ = embassy_time::with_timeout(remaining, display_signal.wait()).await;
         } else {
+            // Nothing animating, no overlay — block until signalled.
             display_signal.wait().await;
         }
 
@@ -102,9 +121,45 @@ pub async fn display_task(
             last_tr_status = tr_status;
         }
 
+        // ---- Detect language change ------------------------------------
+        let lang_changed = state.target_lang != last_lang;
+        if lang_changed {
+            last_lang = state.target_lang;
+            lang_overlay_until = Some(embassy_time::Instant::now() + LANG_OVERLAY_DURATION);
+
+            // Draw the overlay exactly once now and flush immediately.
+            render_lang_overlay(&mut fb, &mut renderer, last_lang);
+            if let Err(e) = fb.flush_async(&mut hw_display).await {
+                info!("Display flush error: {:?}", e);
+            }
+        }
+
+        // ---- Check overlay expiry — force full redraw to restore -------
+        let overlay_visible = if let Some(deadline) = lang_overlay_until {
+            if embassy_time::Instant::now() >= deadline {
+                lang_overlay_until = None;
+                // Force both sections to repaint so the normal content
+                // returns after the overlay disappears.
+                translation_sec.needs_redraw = true;
+                transcript_sec.needs_redraw = true;
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+
         // ---- Advance scroll animations ---------------------------------
+        // Always advance so is_animating() converges even during overlay.
         translation_sec.advance(scroll_per_frame);
         transcript_sec.advance(scroll_per_frame);
+
+        // While the overlay is visible, skip section rendering — the text
+        // data has already been captured above and will render on expiry.
+        if overlay_visible {
+            continue;
+        }
 
         // ---- Render sections that need it ------------------------------
         // Skip translation rendering while a primary status overlay is shown.
@@ -144,4 +199,44 @@ pub async fn display_task(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Centered language overlay
+// ---------------------------------------------------------------------------
+
+/// Font size for the large centred language code.
+const LANG_OVERLAY_PX: f32 = 96.0;
+const LANG_OVERLAY_COLOR: Rgb666 = Rgb666::new(63, 50, 20); // warm yellow
+
+/// Render the target-language code in large letters, centred both
+/// horizontally and vertically on the screen.  Drawn *on top of* the
+/// normal section content each frame while the overlay is active.
+fn render_lang_overlay(fb: &mut Framebuffer, renderer: &mut FontRenderer, lang: &str) {
+    let text_w = renderer.text_width(lang, LANG_OVERLAY_PX);
+    let text_h = renderer.line_height(LANG_OVERLAY_PX);
+    let x = ((SCREEN_W as f32 - text_w) / 2.0) as i32;
+    let y = ((SCREEN_H as f32 - text_h) / 2.0) as i32;
+
+    // Clear a region behind the text so it's readable over any content.
+    let pad = 16;
+    let rect = Rectangle::new(
+        Point::new(x - pad, y - pad),
+        Size::new(
+            text_w as u32 + 2 * pad as u32,
+            text_h as u32 + 2 * pad as u32,
+        ),
+    );
+    fb.fill_solid(&rect, BG).unwrap();
+
+    renderer
+        .draw_text(
+            fb,
+            lang,
+            Point::new(x, y),
+            LANG_OVERLAY_PX,
+            LANG_OVERLAY_COLOR,
+            BG,
+        )
+        .unwrap();
 }
