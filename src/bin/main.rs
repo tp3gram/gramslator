@@ -140,6 +140,15 @@ async fn main(spawner: Spawner) -> ! {
         delay,
     );
 
+    // ---- Touch (GT911 via I2C) ------------------------------------------------
+
+    let i2c_touch = elecrow_board::touch::init(elecrow_board::touch::TouchHardware {
+        i2c: peripherals.I2C0,
+        sda: peripherals.GPIO15,
+        scl: peripherals.GPIO16,
+        rst: peripherals.GPIO48,
+    });
+
     // ---- WiFi -----------------------------------------------------------------
 
     let network = elecrow_board::wifi::init(
@@ -226,6 +235,12 @@ async fn main(spawner: Spawner) -> ! {
         ))
         .expect("Failed to spawn display task");
     info!("Display task spawned");
+
+    // Touch task (polls GT911, logs left/right zone presses).
+    spawner
+        .spawn(elecrow_board::touch::touch_task(i2c_touch))
+        .expect("Failed to spawn touch task");
+    info!("Touch task spawned");
 
     // Main task has nothing else to do — just idle.
     loop {

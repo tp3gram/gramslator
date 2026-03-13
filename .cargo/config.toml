@@ -2,7 +2,7 @@
 runner = ["./flash.sh"]
 
 [env]
-DEFMT_LOG = "info"
+DEFMT_LOG = "info,mbedtls_rs=error"
 ESP_HAL_CONFIG_PSRAM_MODE = "octal"
 
 [build]
