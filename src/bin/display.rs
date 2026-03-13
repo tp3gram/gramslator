@@ -1071,11 +1071,11 @@ const TRANSLATION_PX: f32 = 48.0;
 const TRANSLATION_COLOR: Rgb666 = Rgb666::new(32, 58, 63); // light cyan
 
 /// Y coordinate of the separator line between regions.
-const SEPARATOR_Y: i32 = 213;
+const SEPARATOR_Y: i32 = 264;
 
-/// ---- Transcript region (bottom ~1/3 of screen) ----
+/// ---- Transcript region (bottom strip) ----
 /// Y coordinate where the transcript region starts.
-const TRANSCRIPT_Y: i32 = SEPARATOR_Y + 5;
+const TRANSCRIPT_Y: i32 = SEPARATOR_Y + 3;
 /// Font size (px) for the transcript.
 const TRANSCRIPT_PX: f32 = 20.0;
 /// Foreground colour for the transcript text.
