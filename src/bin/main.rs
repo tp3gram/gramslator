@@ -196,14 +196,15 @@ async fn main(spawner: Spawner) -> ! {
 
     // ---- Spawn tasks -----------------------------------------------------------
 
-    // Translation task (existing, now receives display_signal too).
-    let translate_signal = gramslator::translation::spawn_translation_task(
-        translate_signal,
-        &spawner,
-        network,
-        tls,
-        display_signal,
-    );
+    // Translation task.
+    spawner
+        .spawn(gramslator::translation::translation_task(
+            translate_signal,
+            network,
+            tls,
+            display_signal,
+        ))
+        .expect("Failed to spawn translation task");
 
     // Deepgram streaming task (persistent, reconnects on failure).
     spawner

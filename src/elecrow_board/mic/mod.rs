@@ -16,6 +16,9 @@ use esp_hal::time::Rate;
 /// Size of the circular DMA buffer in bytes.
 /// Must match the size passed to `dma_circular_buffers!()` in the caller.
 pub const DMA_BUF_SIZE: usize = 32000;
+/// Async pipe bridging the blocking DMA read loop and async consumers.
+/// The blocking side pushes via `try_write`; async readers await via [`read_mic`].
+pub static MIC_PIPE: Pipe<CriticalSectionRawMutex, DMA_BUF_SIZE> = Pipe::new();
 
 pub struct MicHardware<'a> {
     pub i2s: I2S0<'a>,
@@ -25,10 +28,6 @@ pub struct MicHardware<'a> {
     /// PDM data input pin.
     pub din_pin: GPIO10<'a>,
 }
-
-/// Async pipe bridging the blocking DMA read loop and async consumers.
-/// The blocking side pushes via `try_write`; async readers await via [`read_mic`].
-pub static MIC_PIPE: Pipe<CriticalSectionRawMutex, DMA_BUF_SIZE> = Pipe::new();
 
 /// Setup hardware to interface with the `LMD3526B261-OFA01` PDM microphone on the ELECROW board.
 ///
