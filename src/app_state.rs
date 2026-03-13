@@ -1,8 +1,9 @@
 //! Shared application state for cross-task communication.
 //!
-//! Provides a global [`AppState`] holding the current transcript and
-//! translation, protected by a `critical_section::Mutex`.  Helper functions
-//! allow any Embassy task to update or read the state atomically.
+//! Provides a global [`AppState`] holding the current transcript,
+//! translation, and service connection statuses, protected by a
+//! `critical_section::Mutex`.  Helper functions allow any Embassy task to
+//! update or read the state atomically.
 //!
 //! A [`DisplaySignal`] is used to wake the display task whenever the
 //! visible state changes.
@@ -23,12 +24,40 @@ use embassy_sync::signal::Signal;
 /// latest state on wake).
 pub type DisplaySignal = Signal<CriticalSectionRawMutex, ()>;
 
+/// Connection status for a remote service (WiFi, Deepgram, Google Translate).
+#[derive(Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum ServiceStatus {
+    /// Not yet attempted.
+    Idle,
+    /// TCP/TLS/WS handshake or WiFi association in progress.
+    Connecting,
+    /// Actively connected and operational.
+    Connected,
+    /// Last attempt failed; will retry.
+    Error,
+}
+
 /// Application-visible state shared between tasks.
 struct AppState {
     /// The most recent transcript received from Deepgram.
     transcript: String,
     /// The most recent translation received from Google Translate.
     translation: String,
+    /// WiFi connection status.
+    wifi_status: ServiceStatus,
+    /// Deepgram WebSocket connection status.
+    deepgram_status: ServiceStatus,
+    /// Google Translate connection status.
+    translate_status: ServiceStatus,
+}
+
+/// Snapshot of the shared state, returned by [`read_state`].
+pub struct StateSnapshot {
+    pub transcript: String,
+    pub translation: String,
+    pub wifi_status: ServiceStatus,
+    pub deepgram_status: ServiceStatus,
+    pub translate_status: ServiceStatus,
 }
 
 /// Global shared state, initialised lazily on first write.
@@ -42,6 +71,9 @@ fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> R {
         let state = borrow.get_or_insert_with(|| AppState {
             transcript: String::new(),
             translation: String::new(),
+            wifi_status: ServiceStatus::Idle,
+            deepgram_status: ServiceStatus::Idle,
+            translate_status: ServiceStatus::Idle,
         });
         f(state)
     })
@@ -78,16 +110,61 @@ pub fn update_translation(text: &str) -> bool {
     })
 }
 
-/// Read a snapshot of the current transcript and translation.
+/// Update the WiFi connection status.  Returns `true` if it changed.
+pub fn update_wifi_status(status: ServiceStatus) -> bool {
+    with_state(|state| {
+        if state.wifi_status == status {
+            return false;
+        }
+        state.wifi_status = status;
+        true
+    })
+}
+
+/// Update the Deepgram connection status.  Returns `true` if it changed.
+pub fn update_deepgram_status(status: ServiceStatus) -> bool {
+    with_state(|state| {
+        if state.deepgram_status == status {
+            return false;
+        }
+        state.deepgram_status = status;
+        true
+    })
+}
+
+/// Update the Google Translate connection status.  Returns `true` if it changed.
+pub fn update_translate_status(status: ServiceStatus) -> bool {
+    with_state(|state| {
+        if state.translate_status == status {
+            return false;
+        }
+        state.translate_status = status;
+        true
+    })
+}
+
+/// Read a snapshot of the current state.
 ///
-/// Returns `(transcript, translation)` as cloned `String`s.  If no state
-/// has been written yet, both strings are empty.
-pub fn read_state() -> (String, String) {
+/// If no state has been written yet, all strings are empty and all
+/// statuses are [`ServiceStatus::Idle`].
+pub fn read_state() -> StateSnapshot {
     critical_section::with(|cs| {
         let borrow = STATE.borrow_ref(cs);
         match &*borrow {
-            Some(state) => (state.transcript.clone(), state.translation.clone()),
-            None => (String::new(), String::new()),
+            Some(state) => StateSnapshot {
+                transcript: state.transcript.clone(),
+                translation: state.translation.clone(),
+                wifi_status: state.wifi_status,
+                deepgram_status: state.deepgram_status,
+                translate_status: state.translate_status,
+            },
+            None => StateSnapshot {
+                transcript: String::new(),
+                translation: String::new(),
+                wifi_status: ServiceStatus::Idle,
+                deepgram_status: ServiceStatus::Idle,
+                translate_status: ServiceStatus::Idle,
+            },
         }
     })
 }

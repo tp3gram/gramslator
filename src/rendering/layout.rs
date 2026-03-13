@@ -35,6 +35,18 @@ pub(super) const TRANSCRIPT_COLOR: Rgb666 = Rgb666::new(48, 48, 48); // light gr
 /// Background colour for the entire screen.
 pub(super) const BG: Rgb666 = Rgb666::BLACK;
 
+/// ---- Primary status (WiFi / Deepgram) — centered overlay ----
+pub(super) const PRIMARY_STATUS_PX: f32 = 28.0;
+pub(super) const PRIMARY_STATUS_SUBTITLE_PX: f32 = 20.0;
+
+/// ---- Translate status indicator (small, top-right corner) ----
+pub(super) const TR_STATUS_X: i32 = SCREEN_W - 80;
+pub(super) const TR_STATUS_Y: i32 = 2;
+pub(super) const TR_STATUS_W: u32 = 72;
+pub(super) const TR_STATUS_H: u32 = 16;
+pub(super) const TR_STATUS_PX: f32 = 14.0;
+pub(super) const TR_STATUS_COLOR: Rgb666 = Rgb666::new(32, 32, 32); // dim grey
+
 /// Scroll animation speed in pixels per second.
 pub(super) const SCROLL_SPEED: f32 = 900.0;
 /// Duration of one animation frame (~30 fps).

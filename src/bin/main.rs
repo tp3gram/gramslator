@@ -140,6 +140,13 @@ async fn main(spawner: Spawner) -> ! {
         delay,
     );
 
+    // ---- Shared signals (created early so WiFi init can use display_signal) ----
+
+    // Display signal — any task signals this to wake the display renderer.
+    static DISPLAY_SIGNAL: StaticCell<gramslator::app_state::DisplaySignal> = StaticCell::new();
+    let display_signal: &'static gramslator::app_state::DisplaySignal =
+        DISPLAY_SIGNAL.init(gramslator::app_state::DisplaySignal::new());
+
     // ---- WiFi -----------------------------------------------------------------
 
     let network = elecrow_board::wifi::init(
@@ -147,6 +154,7 @@ async fn main(spawner: Spawner) -> ! {
             wifi: peripherals.WIFI,
         },
         &spawner,
+        display_signal,
     );
 
     // ---- TLS initialization ---------------------------------------------------
@@ -181,13 +189,6 @@ async fn main(spawner: Spawner) -> ! {
         esp_alloc::HEAP.used(),
         esp_alloc::HEAP.free()
     );
-
-    // ---- Shared signals --------------------------------------------------------
-
-    // Display signal — any task signals this to wake the display renderer.
-    static DISPLAY_SIGNAL: StaticCell<gramslator::app_state::DisplaySignal> = StaticCell::new();
-    let display_signal: &'static gramslator::app_state::DisplaySignal =
-        DISPLAY_SIGNAL.init(gramslator::app_state::DisplaySignal::new());
 
     // Translate signal — the Deepgram task signals this to request a translation.
     static TRANSLATE_SIGNAL: StaticCell<gramslator::translation::TranslateSignal> =

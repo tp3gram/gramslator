@@ -2,13 +2,13 @@ use defmt::info;
 use embassy_time::Duration;
 use mbedtls_rs::Tls;
 
-use crate::app_state::{self, DisplaySignal};
+use crate::app_state::{self, DisplaySignal, ServiceStatus};
 use crate::networking::Connection;
 
 use super::helpers::*;
 
 /// Maximum time to buffer partial transcripts before translating.
-const TRANSLATE_DEBOUNCE_DEADLINE: Duration = Duration::from_secs(1);
+const TRANSLATE_DEBOUNCE_DEADLINE: Duration = Duration::from_millis(500);
 
 /// Background task that receives Deepgram JSON via a signal, debounces
 /// rapid partial transcripts, then translates the latest one (en -> es)
@@ -65,6 +65,10 @@ pub async fn translation_task(
             continue;
         }
 
+        if app_state::update_translate_status(ServiceStatus::Connecting) {
+            display_signal.signal(());
+        }
+
         let mut conn = match Connection::open_tcp_connection_with_tls(
             stack,
             env!("GOOGLE_TRANSLATE_HOST"),
@@ -76,12 +80,22 @@ pub async fn translation_task(
             Ok(c) => c,
             Err(e) => {
                 info!("Failed to connect to Google Translate: {:?}", e);
+                if app_state::update_translate_status(ServiceStatus::Error) {
+                    display_signal.signal(());
+                }
                 continue;
             }
         };
 
+        if app_state::update_translate_status(ServiceStatus::Connected) {
+            display_signal.signal(());
+        }
+
         translate_response(&mut conn, transcript, display_signal).await;
 
         conn.close().await;
+        if app_state::update_translate_status(ServiceStatus::Idle) {
+            display_signal.signal(());
+        }
     }
 }
