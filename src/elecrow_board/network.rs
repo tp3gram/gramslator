@@ -2,8 +2,8 @@ use alloc::string::String;
 
 use crate::app_state::{self, DisplaySignal};
 use crate::elecrow_board::mic::MIC_PIPE;
-use crate::net::{self, Connection};
-use crate::translate;
+use crate::networking::{self as net, Connection};
+use crate::translation as translate;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_net::StackResources;

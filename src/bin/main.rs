@@ -10,8 +10,6 @@
 
 extern crate alloc;
 
-mod display;
-
 use defmt::info;
 use embassy_executor::Spawner;
 use esp_backtrace as _;
@@ -22,7 +20,8 @@ use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::system::Stack;
 use esp_hal::timer::timg::TimerGroup;
 use gramslator::elecrow_board;
-use gramslator::net;
+use gramslator::networking;
+use gramslator::rendering;
 use static_cell::StaticCell;
 use tinyrlibc as _;
 
@@ -154,20 +153,20 @@ async fn main(spawner: Spawner) -> ! {
     // Stored in a StaticCell so the spawned tasks can hold a
     // `&'static Tls<'static>` reference.
     static TLS: StaticCell<mbedtls_rs::Tls<'static>> = StaticCell::new();
-    let tls: &'static mbedtls_rs::Tls<'static> = TLS.init(net::init_global_tls(net::TlsHardware {
+    let tls: &'static mbedtls_rs::Tls<'static> = TLS.init(networking::init_global_tls(networking::TlsHardware {
         rng: peripherals.RNG,
         adc1: peripherals.ADC1,
     }));
 
     // ---- Framebuffer + font renderer -------------------------------------------
-    let fb = display::Framebuffer::new(480, 320);
+    let fb = rendering::Framebuffer::new(480, 320);
     info!(
         "Framebuffer allocated — Heap used: {} bytes, free: {} bytes",
         esp_alloc::HEAP.used(),
         esp_alloc::HEAP.free()
     );
 
-    let renderer = display::FontRenderer::default_font();
+    let renderer = rendering::FontRenderer::default_font();
     info!(
         "After font load — Heap used: {} bytes, free: {} bytes",
         esp_alloc::HEAP.used(),
@@ -182,13 +181,13 @@ async fn main(spawner: Spawner) -> ! {
         DISPLAY_SIGNAL.init(gramslator::app_state::DisplaySignal::new());
 
     // Translate signal — the Deepgram task signals this to request a translation.
-    static TRANSLATE_SIGNAL: StaticCell<gramslator::translate::TranslateSignal> = StaticCell::new();
-    let translate_signal = TRANSLATE_SIGNAL.init(gramslator::translate::TranslateSignal::new());
+    static TRANSLATE_SIGNAL: StaticCell<gramslator::translation::TranslateSignal> = StaticCell::new();
+    let translate_signal = TRANSLATE_SIGNAL.init(gramslator::translation::TranslateSignal::new());
 
     // ---- Spawn tasks -----------------------------------------------------------
 
     // Translation task (existing, now receives display_signal too).
-    let translate_signal = gramslator::translate::spawn_translation_task(
+    let translate_signal = gramslator::translation::spawn_translation_task(
         translate_signal,
         &spawner,
         network,
@@ -209,7 +208,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Display task (renders transcript + translation on signal).
     spawner
-        .spawn(display::display_task(
+        .spawn(rendering::display_task(
             hw_display,
             fb,
             renderer,
