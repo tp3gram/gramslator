@@ -10,6 +10,21 @@ renders both the original text and the translation on a
 480x320 color touchscreen — all running as `no_std` embedded
 Rust firmware on an ESP32-S3 microcontroller.
 
+Unlike bleeding-edge translation devices that synthesize
+audio output via text-to-speech, Gramslator deliberately
+presents translations as on-screen text. This is an
+intentional design choice that explores a different
+interaction model: text output lets both speakers read at
+their own pace, re-read phrases they missed, and maintain
+eye contact and natural conversational cadence without
+waiting for a synthetic voice to finish speaking. It
+preserves the original speaker's voice as the only audio in
+the room, avoiding the uncanny interruption of a robotic
+intermediary. The visual approach also sidesteps the
+latency and cognitive load of competing audio streams —
+the wearer glances down to read rather than splitting
+attention between two voices.
+
 The wearable is built on the [ELECROW CrowPanel Advance
 3.5" HMI](https://a.co/d/089DIeBc)
 (ESP32-S3-WROOM-1-N16R8) and uses no external computer or

@@ -4,35 +4,36 @@ Language barriers prevent real-time communication between
 people who speak different languages. Existing translation
 apps require pulling out a phone, opening an app, and often
 speaking into it one sentence at a time — breaking the flow
-of natural conversation. There is no affordable, dedicated,
-always-on wearable that sits between two speakers and
-provides continuous live translation with both the original
-transcript and the translated text visible simultaneously.
+of natural conversation. Bleeding-edge translation devices
+synthesize translated speech via text-to-speech,
+but competing audio streams split the listener's attention
+and introduce an uncanny robotic intermediary into what
+should be a human exchange.
+
+There is no affordable, dedicated, always-on wearable that explores
+the alternative: presenting translations as persistent,
+glanceable text that preserves the original speaker's voice
+as the only sound in the room.
 
 ## Our solution
 
-Gramslator is a wearable translation device built on a
-[$30 ESP32-S3 touchscreen (ELECROW CrowPanel
-3.5")](https://a.co/d/089DIeBc). Device specs, schematics,
-and IC datasheets are available in the [manufacturer's
-GitHub repo](https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320).
-It continuously listens via an on-board PDM microphone,
-streams
-audio to Deepgram for real-time speech-to-text transcription
-over a WebSocket connection, translates the transcript via
-Google Translate, and displays both the original English
-transcript and the translation on a 480x320 color
-touchscreen — all with no phone or computer required after
-initial WiFi setup.
+Gramslator is a wearable translation device. It
+continuously listens via an on-board microphone, streams
+audio to Deepgram for real-time speech-to-text
+transcription, translates the transcript via Google
+Translate, and displays both the original English transcript
+and the translation on a color touchscreen — all with no
+phone or computer required after initial WiFi setup.
 
-The entire firmware is written in Rust (`no_std`, ~3,500
-lines) running on the Embassy async runtime. It uses the
-ESP32-S3's dual cores: one dedicated to DMA microphone
-capture, the other running async networking, translation,
-and display rendering. TrueType fonts (Noto Sans JP —
-Latin, Japanese, Devanagari) are stored in a dedicated flash
-partition and memory-mapped for zero-copy glyph rendering
-with anti-aliasing and LRU caching.
+By rendering text rather than synthesizing speech,
+Gramslator explores a fundamentally different feel from
+audio-output translators. Readers absorb the translation at
+their own pace, re-read phrases they missed, and maintain
+natural conversational cadence without waiting for a
+synthetic voice to finish. The original speaker's voice
+remains the only audio in the room, preserving the warmth
+and nuance of human speech. A quick glance replaces the
+cognitive load of parsing two competing audio streams.
 
 ## Team members we're looking for
 
