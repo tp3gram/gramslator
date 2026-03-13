@@ -14,6 +14,20 @@ Guide for ESP32 with related screen using `esp-generate`: https://esp32.implrust
 
 Prior to `cargo build`, `espup install` provides command for exporting environment variables related for the xtensa toolchain when opening a new terminal session.
 
+### Font partition
+
+The TrueType font lives in a separate flash partition so that code-only
+changes don't re-flash the ~5 MB font file. The font is flashed
+automatically by `cargo run` via the `flash.sh` wrapper script.
+`espflash` checksums each region before writing, so unchanged font data
+is skipped in ~1 second.
+
+To flash the font manually (e.g. without building the app):
+
+```bash
+espflash write-bin --chip esp32s3 0xA00000 assets/NotoSansJP-Medium.ttf
+```
+
 ### ELECROW Board Hardware definitions
 
 Chipset: `ESP32-S3-WROOM-1-N16R8` ([Datasheet](https://github.com/Elecrow-RD/CrowPanel-Advance-3.5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-480x320/blob/master/Datasheet/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf))

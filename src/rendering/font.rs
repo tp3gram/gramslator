@@ -7,12 +7,12 @@ use embedded_graphics::prelude::*;
 
 use super::framebuffer::{Point, Rectangle, Rgb666, Size};
 
-/// Default font data baked into flash (Noto Sans JP Regular, OFL-licensed).
-///
-/// Subset to: Basic Latin, Latin-1/Extended, Greek, Cyrillic, Hiragana,
-/// Katakana, CJK Unified Ideographs, CJK/General punctuation, Hangul Jamo,
-/// Halfwidth/Fullwidth forms, and currency symbols.
-const DEFAULT_FONT_DATA: &[u8] = include_bytes!("assets/NotoSansJP-Medium.ttf");
+// Font data for the TrueType renderer.
+//
+// Previously baked in via `include_bytes!`, the font now lives in a
+// dedicated flash partition and is memory-mapped at startup by
+// `gramslator::flash_data::map_flash_region`.  The slice is injected
+// via `FontRenderer::new`.
 
 /// Default maximum number of cached glyphs before LRU eviction kicks in.
 ///
@@ -59,7 +59,8 @@ pub struct FontRenderer {
 impl FontRenderer {
     /// Create a renderer from raw font bytes.
     ///
-    /// The data must be `'static` (e.g. from `include_bytes!`).
+    /// The data must be `'static` (e.g. memory-mapped flash via
+    /// [`flash_data::map_flash_region`](crate::flash_data::map_flash_region)).
     /// Construction is essentially free — no glyph outlines are processed.
     pub fn new(font_data: &'static [u8]) -> Self {
         let face = ttf_parser::Face::parse(font_data, 0).expect("Failed to parse TTF/OTF font");
@@ -69,11 +70,6 @@ impl FontRenderer {
             access_counter: 0,
             max_cache_size: DEFAULT_MAX_CACHE_SIZE,
         }
-    }
-
-    /// Create a renderer using the built-in Inter Regular font.
-    pub fn default_font() -> Self {
-        Self::new(DEFAULT_FONT_DATA)
     }
 
     /// Set the maximum number of cached glyphs.
