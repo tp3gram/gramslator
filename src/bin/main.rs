@@ -146,6 +146,14 @@ async fn main(spawner: Spawner) -> ! {
     static DISPLAY_SIGNAL: StaticCell<gramslator::app_state::DisplaySignal> = StaticCell::new();
     let display_signal: &'static gramslator::app_state::DisplaySignal =
         DISPLAY_SIGNAL.init(gramslator::app_state::DisplaySignal::new());
+    // ---- Touch (GT911 via I2C) ------------------------------------------------
+
+    let i2c_touch = elecrow_board::touch::init(elecrow_board::touch::TouchHardware {
+        i2c: peripherals.I2C0,
+        sda: peripherals.GPIO15,
+        scl: peripherals.GPIO16,
+        rst: peripherals.GPIO48,
+    });
 
     // ---- WiFi -----------------------------------------------------------------
 
@@ -228,6 +236,12 @@ async fn main(spawner: Spawner) -> ! {
         ))
         .expect("Failed to spawn display task");
     info!("Display task spawned");
+
+    // Touch task (polls GT911, logs left/right zone presses).
+    spawner
+        .spawn(elecrow_board::touch::touch_task(i2c_touch))
+        .expect("Failed to spawn touch task");
+    info!("Touch task spawned");
 
     // Main task has nothing else to do — just idle.
     loop {

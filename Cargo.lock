@@ -1668,6 +1668,7 @@ dependencies = [
  "embassy-time",
  "embedded-graphics",
  "embedded-hal 1.0.0",
+ "embedded-hal-async",
  "embedded-hal-bus",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
@@ -1679,6 +1680,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp32s3",
+ "gt911",
  "konst",
  "libm",
  "mbedtls-rs",
@@ -1687,6 +1689,17 @@ dependencies = [
  "static_cell",
  "tinyrlibc",
  "ttf-parser",
+]
+
+[[package]]
+name = "gt911"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65a60a0e3e4a85a5a309b6c012a491730d51e0210f56b70acfc7d912a163b060"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "heapless 0.8.0",
 ]
 
 [[package]]
