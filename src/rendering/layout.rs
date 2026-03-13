@@ -36,7 +36,7 @@ pub(super) const TRANSCRIPT_COLOR: Rgb666 = Rgb666::new(48, 48, 48); // light gr
 pub(super) const BG: Rgb666 = Rgb666::BLACK;
 
 /// Scroll animation speed in pixels per second.
-pub(super) const SCROLL_SPEED: f32 = 700.0;
+pub(super) const SCROLL_SPEED: f32 = 900.0;
 /// Duration of one animation frame (~30 fps).
 pub(super) const ANIM_FRAME_MS: u64 = 33;
 pub(super) const ANIM_FRAME_DURATION: embassy_time::Duration =

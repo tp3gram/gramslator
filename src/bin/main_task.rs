@@ -12,6 +12,51 @@ use mbedtls_rs::Tls;
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------
+// Pre-masked WebSocket binary frame send
+// ---------------------------------------------------------------------------
+
+/// Apply the WebSocket XOR mask to `buf` in place.
+///
+/// The mask is a repeating 4-byte XOR key; `payload_offset` indicates how far
+/// into the payload this slice starts (normally 0 for complete payloads).
+fn ws_mask_in_place(buf: &mut [u8], mask_key: u32, payload_offset: usize) {
+    let mask = mask_key.to_be_bytes();
+    for (i, byte) in buf.iter_mut().enumerate() {
+        *byte ^= mask[(payload_offset + i) % 4];
+    }
+}
+
+/// Send a WebSocket Binary frame whose payload has already been masked.
+///
+/// This avoids the 32-byte chunked masking loop in `edge_ws::io::send`, which
+/// causes mbedTLS to emit one TLS record per chunk.  Instead we write just
+/// two `write_all` calls (header + payload), producing at most two TLS records.
+async fn ws_send_binary_premasked<W: embedded_io_async::Write>(
+    conn: &mut W,
+    mask_key: u32,
+    payload: &[u8],
+) -> Result<(), W::Error> {
+    // Build the frame header using edge_ws's serializer so we stay in sync
+    // with the wire format it expects when reading responses.
+    let header = edge_ws::FrameHeader {
+        frame_type: edge_ws::FrameType::Binary(false),
+        payload_len: payload.len() as u64,
+        mask_key: Some(mask_key),
+    };
+    let mut hdr_buf = [0u8; edge_ws::FrameHeader::MAX_LEN];
+    let hdr_len = header
+        .serialize(&mut hdr_buf)
+        .expect("header buf too small");
+
+    // Single write for the header (≤14 bytes → 1 TLS record).
+    conn.write_all(&hdr_buf[..hdr_len]).await?;
+    // Single write for the pre-masked payload → 1 TLS record.
+    conn.write_all(payload).await?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Persistent Deepgram streaming task
 // ---------------------------------------------------------------------------
 
@@ -81,13 +126,13 @@ pub async fn read_mic_and_send_loop_task(
                 }
             }
 
-            if let Err(e) = edge_ws::io::send(
-                &mut conn,
-                edge_ws::FrameType::Binary(false),
-                Some(mask_key),
-                &mic_read_buf[..mono_len],
-            )
-            .await
+            // Pre-mask the payload in place, then send header + payload as
+            // two large writes.  This produces 2 TLS records instead of ~126
+            // (edge_ws's default 32-byte chunked masking path).
+            ws_mask_in_place(&mut mic_read_buf[..mono_len], mask_key, 0);
+
+            if let Err(e) =
+                ws_send_binary_premasked(&mut conn, mask_key, &mic_read_buf[..mono_len]).await
             {
                 info!("Failed to send audio chunk: {:?}", e);
                 done = true;
