@@ -270,7 +270,7 @@ pub async fn deepgram_task(
 
         let mask_key: u32 = 0xDEAD_BEEF; // Fixed mask key for PoC
 
-        let mut mic_read_buf = [0u8; 4096];
+        let mut mic_read_buf = [0u8; 8000];
         let mut recv_buf = [0u8; 4096];
         let mut done = false;
         /// How long to poll for a response between audio chunks.
@@ -344,59 +344,12 @@ pub async fn deepgram_task(
                 }
             }
         }
-        info!("Audio sent! Reading remaining responses for 5 seconds...");
-
-        // ---- Read remaining responses for up to 5 seconds ---------------
-        let deadline = embassy_time::Instant::now() + Duration::from_secs(5);
-
-        while !done && embassy_time::Instant::now() < deadline {
-            let remaining = deadline - embassy_time::Instant::now();
-
-            match embassy_time::with_timeout(remaining, edge_ws::io::recv(&mut conn, &mut recv_buf))
-                .await
-            {
-                Err(_timeout) => {
-                    info!("5-second window elapsed.");
-                    break;
-                }
-                Ok(Ok((frame_type, len))) => {
-                    done = handle_ws_frame(
-                        frame_type,
-                        &recv_buf[..len],
-                        &mut conn,
-                        mask_key,
-                        translate_signal,
-                        display_signal,
-                    )
-                    .await;
-                }
-                Ok(Err(e)) => {
-                    info!("WebSocket recv error: {:?}", e);
-                    done = true;
-                }
-            }
-        }
-
-        // Tell the translation task to flush immediately.
+        // Flush translation so partial transcripts aren't stuck.
         translate_signal.signal(translate::TranscriptMessage::Flush);
-
-        // Signal end of audio stream.
-        if !done {
-            let close_stream = b"{\"type\":\"CloseStream\"}";
-            let _ = edge_ws::io::send(
-                &mut conn,
-                edge_ws::FrameType::Text(false),
-                Some(mask_key),
-                close_stream,
-            )
-            .await;
-            let _ = conn.flush().await;
-            info!("Sent CloseStream");
-        }
 
         conn.close().await;
         info!(
-            "Deepgram stream complete. Reconnecting in {} s...",
+            "Deepgram connection lost. Reconnecting in {} s...",
             RECONNECT_DELAY.as_secs()
         );
         Timer::after(RECONNECT_DELAY).await;
