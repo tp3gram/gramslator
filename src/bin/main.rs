@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+mod main_task;
+
 use defmt::info;
 use embassy_executor::Spawner;
 use esp_backtrace as _;
@@ -140,8 +142,8 @@ async fn main(spawner: Spawner) -> ! {
 
     // ---- WiFi -----------------------------------------------------------------
 
-    let network = elecrow_board::network::init(
-        elecrow_board::network::NetworkHardware {
+    let network = elecrow_board::wifi::init(
+        elecrow_board::wifi::NetworkHardware {
             wifi: peripherals.WIFI,
         },
         &spawner,
@@ -197,7 +199,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Deepgram streaming task (persistent, reconnects on failure).
     spawner
-        .spawn(elecrow_board::network::deepgram_task(
+        .spawn(main_task::read_mic_and_send_loop_task(
             network,
             tls,
             translate_signal,

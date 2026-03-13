@@ -1,6 +1,10 @@
 extern crate alloc;
 
-use defmt::{error, info};
+mod dma_blocking_read_task;
+
+pub use dma_blocking_read_task::read_mic_dma_loop_blocking;
+
+use defmt::info;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pipe::Pipe;
 use esp_hal::Blocking;
@@ -21,6 +25,10 @@ pub struct MicHardware<'a> {
     /// PDM data input pin.
     pub din_pin: GPIO10<'a>,
 }
+
+/// Async pipe bridging the blocking DMA read loop and async consumers.
+/// The blocking side pushes via `try_write`; async readers await via [`read_mic`].
+pub static MIC_PIPE: Pipe<CriticalSectionRawMutex, DMA_BUF_SIZE> = Pipe::new();
 
 /// Setup hardware to interface with the `LMD3526B261-OFA01` PDM microphone on the ELECROW board.
 ///
@@ -59,13 +67,6 @@ pub fn init<'d>(
     pcm_sample_rate: u32,
 ) -> I2sRx<'d, Blocking> {
     // Step 1: Init I2S in TDM mode via esp-hal.
-    // Derive i2s_rate from the target PCM output rate (see doc comment for full derivation):
-    //   i2s_rate = pcm_sample_rate * DSR_DIVISOR / BITS_PER_FRAME
-    //   bclk     = i2s_rate * 2 * 16             (PDM clock on WS pin)
-    //   mclk     = i2s_rate * 256
-    //   mclk_div = 160 MHz / mclk                (may be fractional)
-    //   bclk_div = mclk / bclk = 256 / 32 = 8   (PDM minimum)
-    // With DSR_8S (÷64): PCM output = bclk / 64 = pcm_sample_rate.
     const BITS_PER_FRAME: u32 = 32; // Data16Channel16: 2 channels × 16 bits
     const DSR_DIVISOR: u32 = 64; // DSR_8S mode (rx_pdm_sinc_dsr_16_en = 0)
     let i2s_sample_rate = pcm_sample_rate * DSR_DIVISOR / BITS_PER_FRAME;
@@ -89,7 +90,6 @@ pub fn init<'d>(
     enable_pdm_rx();
 
     // Step 3: Build RX channel with correct GPIO mapping.
-    // On ESP32-S3, PDM clock is output on the WS signal path (not BCLK).
     i2s.i2s_rx
         .with_ws(mic_hardware.clk_pin)
         .with_din(mic_hardware.din_pin)
@@ -126,44 +126,4 @@ fn enable_pdm_rx() {
     // Latch register changes into the I2S clock domain via rx_update (bit 8).
     i2s0.rx_conf().modify(|_, w| w.rx_update().clear_bit());
     i2s0.rx_conf().modify(|_, w| w.rx_update().set_bit());
-}
-
-/// Async pipe bridging the blocking DMA read loop and async consumers.
-/// The blocking side pushes via `try_write`; async readers await via [`read_mic`].
-pub static MIC_PIPE: Pipe<CriticalSectionRawMutex, DMA_BUF_SIZE> = Pipe::new();
-
-/// Starts circular DMA and runs a blocking read loop, pushing popped audio
-/// data into [`MIC_PIPE`]. Does not return unless a DMA error occurs.
-pub fn read_mic_dma_loop_blocking(
-    i2s_rx: &mut I2sRx<'_, Blocking>,
-    rx_buffer: &mut [u8; DMA_BUF_SIZE],
-) {
-    info!("Mic DMA");
-
-    let mut transfer = i2s_rx
-        .read_dma_circular(rx_buffer)
-        .expect("Failed to start I2S circular DMA read");
-
-    let mut buf = alloc::vec![0u8; DMA_BUF_SIZE];
-
-    loop {
-        match transfer.available() {
-            Err(e) => {
-                info!("DMA error: {}", e);
-                break;
-            }
-            Ok(0) => {} // nothing ready yet
-            Ok(_) => {
-                let read = transfer.pop(&mut buf).expect("pop failed");
-                // info!("DMA read: {}", read);
-
-                // Non-blocking write into the pipe; drops data if the pipe is full.
-                let _ = MIC_PIPE.try_write(&buf[..read]).map_err(|e| {
-                    error!("Pipe write error: {}", e);
-                });
-            }
-        }
-    }
-
-    info!("DMA loop exited.");
 }
