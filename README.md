@@ -14,17 +14,19 @@ Guide for ESP32 with related screen using `esp-generate`: https://esp32.implrust
 
 Prior to `cargo build`, `espup install` provides command for exporting environment variables related for the xtensa toolchain when opening a new terminal session.
 
-### Font partition (one-time setup)
+### Font partition
 
 The TrueType font lives in a separate flash partition so that code-only
-changes don't re-flash the ~5 MB font file. Flash it once (or whenever
-the font changes):
+changes don't re-flash the ~5 MB font file. The font is flashed
+automatically by `cargo run` via the `flash.sh` wrapper script.
+`espflash` checksums each region before writing, so unchanged font data
+is skipped in ~1 second.
+
+To flash the font manually (e.g. without building the app):
 
 ```bash
 espflash write-bin --chip esp32s3 0xA00000 assets/NotoSansJP-Medium.ttf
 ```
-
-After that, `cargo run --release` only flashes the ~1 MB application image.
 
 ### ELECROW Board Hardware definitions
 
