@@ -1658,6 +1658,7 @@ name = "gramslator"
 version = "0.1.0"
 dependencies = [
  "ab_glyph_rasterizer",
+ "const_format",
  "critical-section",
  "defmt 1.0.1",
  "edge-ws",

@@ -93,7 +93,7 @@ async fn main(spawner: Spawner) -> ! {
             din_pin: peripherals.GPIO10,
         },
         rx_descriptors,
-        8_000,
+        gramslator::SAMPLE_RATE,
     );
 
     // ---- Second core: blocking DMA read loop ---------------------------------

@@ -1,3 +1,4 @@
+use const_format::concatcp;
 use defmt::info;
 use embedded_io_async::{Read, Write};
 use mbedtls_rs::Tls;
@@ -5,8 +6,10 @@ use mbedtls_rs::Tls;
 use super::connection::{Connection, ConnectionError};
 use super::find_header_end;
 
-static DEEPGRAM_LISTEN_WEBSOCKET_REQUEST: &str = concat!(
-    "GET /v2/listen?eot_threshold=0.7&eot_timeout_ms=5000&model=flux-general-en&encoding=linear16&sample_rate=8000 HTTP/1.1\r\n",
+static DEEPGRAM_LISTEN_WEBSOCKET_REQUEST: &str = concatcp!(
+    "GET /v2/listen?eot_threshold=0.7&eot_timeout_ms=5000&model=flux-general-en&encoding=linear16&sample_rate=",
+    crate::SAMPLE_RATE,
+    " HTTP/1.1\r\n",
     "Host: ",
     env!("DEEPGRAM_HOST"),
     "\r\n",
