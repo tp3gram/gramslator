@@ -1,10 +1,10 @@
+use defmt::info;
+use embassy_time::{Duration, Timer};
+use embedded_io_async::Write as _;
 use gramslator::app_state::DisplaySignal;
 use gramslator::elecrow_board::mic::MIC_PIPE;
 use gramslator::networking::{self as net, handle_ws_frame};
 use gramslator::translation as translate;
-use defmt::info;
-use embassy_time::{Duration, Timer};
-use embedded_io_async::Write as _;
 use mbedtls_rs::Tls;
 
 /// Delay before reconnecting to Deepgram after a connection error or stream

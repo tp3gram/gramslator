@@ -23,10 +23,10 @@ use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::spi::master::{AnySpi, Config, Spi};
 use esp_hal::time::Rate;
 
+use mipidsi::Builder;
 use mipidsi::interface::SpiInterface;
 use mipidsi::models::ILI9488Rgb666;
 use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
-use mipidsi::Builder;
 
 use hardware::InitSpiDevice;
 
@@ -84,7 +84,10 @@ pub fn init<'a>(
     );
 
     // -- mipidsi init phase (blocking) ------------------------------------
-    let device = InitSpiDevice { bus: spi_dma_bus, cs };
+    let device = InitSpiDevice {
+        bus: spi_dma_bus,
+        cs,
+    };
     let mut buffer = [0u8; 1024];
     let spi_interface = SpiInterface::new(device, dc, &mut buffer);
 

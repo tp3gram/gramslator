@@ -5,7 +5,7 @@ mod websocket;
 
 pub use connection::{Connection, ConnectionError, MAX_CONNECTIONS};
 pub use deepgram::{deepgram_create_listen_socket, deepgram_listen_socket_upgrade};
-pub use tls::{init_global_tls, TlsHardware};
+pub use tls::{TlsHardware, init_global_tls};
 pub use websocket::handle_ws_frame;
 
 // ---- Shared helpers --------------------------------------------------------

@@ -177,14 +177,20 @@ async fn translation_task(
             continue;
         }
 
-        let mut conn =
-            match Connection::open_tcp_connection_with_tls(stack, env!("GOOGLE_TRANSLATE_HOST"), 443, tls).await {
-                Ok(c) => c,
-                Err(e) => {
-                    info!("Failed to connect to Google Translate: {:?}", e);
-                    continue;
-                }
-            };
+        let mut conn = match Connection::open_tcp_connection_with_tls(
+            stack,
+            env!("GOOGLE_TRANSLATE_HOST"),
+            443,
+            tls,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                info!("Failed to connect to Google Translate: {:?}", e);
+                continue;
+            }
+        };
 
         translate_response(&mut conn, transcript, display_signal).await;
 

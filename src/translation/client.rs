@@ -115,10 +115,11 @@ where
     let resp_str =
         core::str::from_utf8(&resp_buf[..resp_len]).map_err(|_| TranslateError::ParseFailed)?;
 
-    let header_end = crate::networking::find_header_end(&resp_buf[..resp_len]).ok_or_else(|| {
-        error!("Could not find end of HTTP headers");
-        TranslateError::ResponseReadFailed
-    })?;
+    let header_end =
+        crate::networking::find_header_end(&resp_buf[..resp_len]).ok_or_else(|| {
+            error!("Could not find end of HTTP headers");
+            TranslateError::ResponseReadFailed
+        })?;
 
     let status_line_end = resp_str[..header_end].find("\r\n").unwrap_or(header_end);
     let status_line = &resp_str[..status_line_end];

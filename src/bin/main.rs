@@ -14,8 +14,8 @@ mod main_task;
 
 use defmt::info;
 use embassy_executor::Spawner;
-use esp_backtrace as _;
 use embassy_time::{Duration, Timer};
+use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::dma_circular_buffers;
 use esp_hal::interrupt::software::SoftwareInterruptControl;
@@ -155,10 +155,11 @@ async fn main(spawner: Spawner) -> ! {
     // Stored in a StaticCell so the spawned tasks can hold a
     // `&'static Tls<'static>` reference.
     static TLS: StaticCell<mbedtls_rs::Tls<'static>> = StaticCell::new();
-    let tls: &'static mbedtls_rs::Tls<'static> = TLS.init(networking::init_global_tls(networking::TlsHardware {
-        rng: peripherals.RNG,
-        adc1: peripherals.ADC1,
-    }));
+    let tls: &'static mbedtls_rs::Tls<'static> =
+        TLS.init(networking::init_global_tls(networking::TlsHardware {
+            rng: peripherals.RNG,
+            adc1: peripherals.ADC1,
+        }));
 
     // ---- Framebuffer + font renderer -------------------------------------------
     let fb = rendering::Framebuffer::new(480, 320);
@@ -183,7 +184,8 @@ async fn main(spawner: Spawner) -> ! {
         DISPLAY_SIGNAL.init(gramslator::app_state::DisplaySignal::new());
 
     // Translate signal — the Deepgram task signals this to request a translation.
-    static TRANSLATE_SIGNAL: StaticCell<gramslator::translation::TranslateSignal> = StaticCell::new();
+    static TRANSLATE_SIGNAL: StaticCell<gramslator::translation::TranslateSignal> =
+        StaticCell::new();
     let translate_signal = TRANSLATE_SIGNAL.init(gramslator::translation::TranslateSignal::new());
 
     // ---- Spawn tasks -----------------------------------------------------------

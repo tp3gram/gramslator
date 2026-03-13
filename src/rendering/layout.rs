@@ -39,7 +39,8 @@ pub(super) const BG: Rgb666 = Rgb666::BLACK;
 pub(super) const SCROLL_SPEED: f32 = 700.0;
 /// Duration of one animation frame (~30 fps).
 pub(super) const ANIM_FRAME_MS: u64 = 33;
-pub(super) const ANIM_FRAME_DURATION: embassy_time::Duration = embassy_time::Duration::from_millis(ANIM_FRAME_MS);
+pub(super) const ANIM_FRAME_DURATION: embassy_time::Duration =
+    embassy_time::Duration::from_millis(ANIM_FRAME_MS);
 
 // ===========================================================================
 // Word-wrap helper
@@ -50,7 +51,12 @@ pub(super) const ANIM_FRAME_DURATION: embassy_time::Duration = embassy_time::Dur
 /// line, it is broken mid-word.
 ///
 /// Returns a `Vec<String>` of lines (without trailing newlines).
-pub(super) fn word_wrap(renderer: &FontRenderer, text: &str, px: f32, max_width: f32) -> Vec<String> {
+pub(super) fn word_wrap(
+    renderer: &FontRenderer,
+    text: &str,
+    px: f32,
+    max_width: f32,
+) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current_line = String::new();
     let mut current_width: f32 = 0.0;
